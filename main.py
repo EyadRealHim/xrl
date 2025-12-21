@@ -9,7 +9,7 @@ from distrax import Categorical
 import optax
 
 from jaxtyping import Array, Float, Bool, Int, DTypeLike
-from typing import Callable, Sequence, NamedTuple, Tuple, Any
+from typing import Generic, TypeVar, Callable, Sequence, NamedTuple, Tuple, Any
 
 from dataclasses import replace
 
@@ -45,8 +45,14 @@ class MultiDiscrete(Space):
         self.dtype = jnp.int32
 
 
-class State(NamedTuple):
-    theta: Float[Array, "..."]
+class Discrete(Space):
+    def __init__(self, n: int):
+        self.n = n
+        self.shape = ()
+        self.dtype = jnp.int32
+
+
+TState = TypeVar("TState")
 
 
 class TimeStep(NamedTuple):
@@ -54,10 +60,10 @@ class TimeStep(NamedTuple):
     done: Bool[Array, "..."]
 
 
-class Environment(eqx.Module):
+class Environment(eqx.Module, Generic[TState]):
     def autostep(
-        self, key: Array, state: State, action: Any
-    ) -> Tuple[State, TimeStep, Observation]:
+        self, key: Array, state: TState, action: Any
+    ) -> Tuple[TState, TimeStep, Observation]:
         key, stepk = jax.random.split(key)
         state, step, obs = self.step(stepk, state, action)
 
@@ -70,12 +76,12 @@ class Environment(eqx.Module):
 
         return state, step, obs
 
-    def reset(self, key: Array) -> Tuple[State, Observation]:
+    def reset(self, key: Array) -> Tuple[TState, Observation]:
         raise NotImplementedError
 
     def step(
-        self, key: Array, state: State, action: Any
-    ) -> Tuple[State, TimeStep, Observation]:
+        self, key: Array, state: TState, action: Any
+    ) -> Tuple[TState, TimeStep, Observation]:
         raise NotImplementedError
 
     def observation_space(self) -> Space:
@@ -85,8 +91,12 @@ class Environment(eqx.Module):
         raise NotImplementedError
 
 
-class MyGame(Environment):
-    def reset(self, key: Array):
+class GameState(NamedTuple):
+    theta: Float[Array, "..."]
+
+
+class MyGame(Environment[GameState]):
+    def reset(self, key):
         theta = jax.random.uniform(
             key=key,
             shape=(1,),
@@ -95,15 +105,15 @@ class MyGame(Environment):
             dtype=jnp.float32,
         )
 
-        state = State(theta=theta)
+        state = GameState(theta=theta)
 
         return state, theta
 
-    def step(self, key: Array, state: State, action):
+    def step(self, key, state, action):
         iota = state.theta - jnp.pi / 12 + action * jnp.pi / 6
         iota = jnp.clip(iota, 0.0, jnp.pi)
 
-        state = State(theta=iota)
+        state = GameState(theta=iota)
         step = TimeStep(
             reward=jnp.squeeze(self.reward(state.theta)),
             done=jnp.squeeze(self.done(state.theta)),
@@ -121,7 +131,7 @@ class MyGame(Environment):
         return Box(low=0, high=jnp.pi, shape=(1,))
 
     def action_space(self):
-        return MultiDiscrete([2])
+        return Discrete(2)
 
 
 class Transition(NamedTuple):
@@ -136,13 +146,38 @@ ActorLogits = Float[Array, "n"]
 
 
 class Actor(eqx.Module):
-    def logits(self, obs: Observation) -> ActorLogits:
+    def __call__(self, obs: Observation) -> ActorLogits:
         raise NotImplementedError
 
 
 class Critic(eqx.Module):
     def value(self, obs: Observation) -> Float[Array, "1"]:
         raise NotImplementedError
+
+
+class ActorAutomatic(eqx.Module):
+    space: Space = eqx.field()
+    actor: Actor
+    head: eqx.nn.Linear
+
+    def __init__(
+        self, key: Array, actor: Actor, space: Space, obs_shape: Sequence[int]
+    ):
+        assert isinstance(space, Discrete)
+
+        self.actor = actor
+        self.space = space
+
+        output = jax.eval_shape(
+            self.actor, jax.ShapeDtypeStruct(obs_shape, jnp.float32)
+        )
+
+        self.head = eqx.nn.Linear(output.size, self.space.n, key=key)
+
+    def __call__(self, obs: Observation):
+        logits = self.head(self.actor(obs))
+
+        return logits, Categorical(logits=logits)
 
 
 class GameCritic(Critic):
@@ -159,14 +194,14 @@ class GameActor(Actor):
     actor: eqx.nn.MLP
 
     def __init__(self, key: Array):
-        self.actor = eqx.nn.MLP(1, 2, width_size=4, depth=1, key=key)
+        self.actor = eqx.nn.MLP(1, 4, width_size=4, depth=1, key=key)
 
-    def logits(self, obs):
+    def __call__(self, obs):
         return self.actor(obs)
 
 
 class ActorCritic(NamedTuple):
-    actor: Actor
+    actor: ActorAutomatic
     critic: Critic
 
 
@@ -176,18 +211,18 @@ class SimplePolicyGradientAgent(eqx.Module):
     opt_state: Tuple[optax.OptState, optax.OptState]
 
 
-class RolloutState(NamedTuple):
+class RolloutState(NamedTuple, Generic[TState]):
     key: Array
-    state: State
+    state: TState
     obs: Observation
 
 
-class SimplePolicyGradientTrainer(eqx.Module):
+class SimplePolicyGradientTrainer(eqx.Module, Generic[TState]):
     optim: optax.GradientTransformation = eqx.field(static=True)
-    env: Environment = eqx.field(static=True)
+    env: Environment[TState] = eqx.field(static=True)
 
     env_n: int = eqx.field(static=True, default=8)
-    batch_n: int = eqx.field(static=True, default=64)
+    cycle_n: int = eqx.field(static=True, default=64)
     step_n: int = eqx.field(static=True, default=128)
 
     lr: float = eqx.field(static=True, default=1e-3)
@@ -195,7 +230,9 @@ class SimplePolicyGradientTrainer(eqx.Module):
     discount: float = eqx.field(static=True, default=0.96)
     lambda_: float = eqx.field(static=True, default=0.95)
 
-    def __init__(self, **kwargs):
+    def __init__(self, env: Environment[TState], **kwargs):
+        self.env = env
+
         for key, value in kwargs.items():
             setattr(self, key, value)
 
@@ -208,8 +245,17 @@ class SimplePolicyGradientTrainer(eqx.Module):
         critic: Callable[[Array], Critic],
     ) -> SimplePolicyGradientAgent:
         a, b = jax.random.split(key)
+        a, c = jax.random.split(a)
+
+        assert isinstance(self.env.observation_space(), Box)
+
         ac = ActorCritic(
-            actor=actor(a),
+            actor=ActorAutomatic(
+                key=c,
+                actor=actor(a),
+                space=self.env.action_space(),
+                obs_shape=self.env.observation_space().shape,
+            ),
             critic=critic(b),
         )
         return SimplePolicyGradientAgent(
@@ -221,17 +267,15 @@ class SimplePolicyGradientTrainer(eqx.Module):
         )
 
     def rollout(
-        self, rs: RolloutState, ac: ActorCritic
-    ) -> Tuple[RolloutState, Transition]:
-        def step(rs: RolloutState, _):
+        self, rs: RolloutState[TState], ac: ActorCritic
+    ) -> Tuple[RolloutState[TState], Transition]:
+        def step(rs: RolloutState[TState], _):
             key, state, obs = rs
             key, actionk, stepk = jax.random.split(key, 3)
 
-            logits = ac.actor.logits(obs)
-            value = ac.critic.value(obs)
-
-            dist = Categorical(logits=logits)
+            logits, dist = ac.actor(obs)
             action = dist.sample(seed=actionk)
+            value = ac.critic.value(obs)
 
             state, (reward, done), obsv = self.env.autostep(stepk, state, action)
 
@@ -247,10 +291,10 @@ class SimplePolicyGradientTrainer(eqx.Module):
 
     def collect(
         self,
-        rs: RolloutState,
+        rs: RolloutState[TState],
         agent: SimplePolicyGradientAgent,
     ) -> Tuple[
-        RolloutState, Transition, Float[Array, "step_n"], Float[Array, "step_n"]
+        RolloutState[TState], Transition, Float[Array, "step_n"], Float[Array, "step_n"]
     ]:
         rs, transition = self.rollout(rs, agent.ac)
 
@@ -275,20 +319,20 @@ class SimplePolicyGradientTrainer(eqx.Module):
 
     def train_step(
         self,
-        rs: RolloutState,
+        rs: RolloutState[TState],
         agent: SimplePolicyGradientAgent,
     ) -> Tuple[
         SimplePolicyGradientAgent,
-        RolloutState,
+        RolloutState[TState],
         Float[Array, "..."],
     ]:
         rs, transition, advantage, returns = jax.vmap(self.collect, in_axes=(0, None))(
             rs, agent
         )
 
-        def actor_loss(actor: Actor, obs, action, advantage):
-            logits = jax.vmap(jax.vmap(actor.logits))(obs)
-            log_p = Categorical(logits).log_prob(action)
+        def actor_loss(actor: ActorAutomatic, obs, action, advantage):
+            _, dist = jax.vmap(jax.vmap(actor))(obs)
+            log_p = dist.log_prob(action)
 
             return -(log_p * advantage).mean(axis=-1).mean()
 
@@ -330,9 +374,9 @@ class SimplePolicyGradientTrainer(eqx.Module):
             transition.reward,
         )
 
-    def train_batch(
-        self, agent: SimplePolicyGradientAgent, rs: RolloutState
-    ) -> Tuple[SimplePolicyGradientAgent, RolloutState, Float[Array, "..."]]:
+    def train_cycle(
+        self, agent: SimplePolicyGradientAgent, rs: RolloutState[TState]
+    ) -> Tuple[SimplePolicyGradientAgent, RolloutState[TState], Float[Array, "..."]]:
         params, static = eqx.partition(agent, eqx.is_array)
 
         def body(pair, _):
@@ -344,7 +388,7 @@ class SimplePolicyGradientTrainer(eqx.Module):
 
             return (params, rs), r
 
-        (params, rs), r = jax.lax.scan(body, (params, rs), length=self.batch_n)
+        (params, rs), r = jax.lax.scan(body, (params, rs), length=self.cycle_n)
         agent = eqx.combine(params, static)
 
         return agent, rs, r
@@ -358,11 +402,11 @@ class SimplePolicyGradientTrainer(eqx.Module):
 
         rs = RolloutState(key=jax.random.split(key, self.env_n), state=state, obs=obs)
 
-        train_batch = eqx.filter_jit(self.train_batch)
+        train_cycle = eqx.filter_jit(self.train_cycle)
 
         mean = 0
         for i in (bar := tqdm(range(0, iterations))):
-            agent, rs, r = train_batch(agent, rs)
+            agent, rs, r = train_cycle(agent, rs)
 
             mean = mean + (r.mean() - mean) / (i + 1)
 
