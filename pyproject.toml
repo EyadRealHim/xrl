@@ -16,4 +16,8 @@ dependencies = [
 dev = [
     "python-lsp-server>=1.14.0",
     "ruff>=0.14.9",
+    "mypy (>=1.19.1,<2.0.0)",
+    "types-tqdm (>=4.67.0.20250809,<5.0.0.0)",
+    "pyright[nodejs] (>=1.1.407,<2.0.0)",
+    "ipython (<9)",
 ]

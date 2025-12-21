@@ -9,12 +9,12 @@ from distrax import Categorical
 import optax
 
 from jaxtyping import Array, Float, Bool, Int, DTypeLike
-from typing import TypeVar, NamedTuple, Tuple, Any
+from typing import Callable, Sequence, NamedTuple, Tuple, Any
 
 from dataclasses import replace
 
 
-Observation = TypeVar("Observation")
+Observation = Array  # TypeVar("Observation")
 
 
 class Space:
@@ -38,7 +38,7 @@ class Box(Space):
 class MultiDiscrete(Space):
     def __init__(
         self,
-        nvec: Tuple[int, ...],
+        nvec: Sequence[int],
     ):
         self.nvec = nvec
         self.shape = (len(nvec),)
@@ -132,25 +132,48 @@ class Transition(NamedTuple):
     done: Bool[Array, "..."]
 
 
+ActorLogits = Float[Array, "n"]
+
+
 class Actor(eqx.Module):
-    def logits(self, obs: Observation) -> Float[Array, "n"]:
+    def logits(self, obs: Observation) -> ActorLogits:
         raise NotImplementedError
 
 
-class GameActor(Actor):
-    policy: eqx.nn.MLP
+class Critic(eqx.Module):
+    def value(self, obs: Observation) -> Float[Array, "1"]:
+        raise NotImplementedError
+
+
+class GameCritic(Critic):
+    critic: eqx.nn.MLP
 
     def __init__(self, key: Array):
-        self.policy = eqx.nn.MLP(1, 2, width_size=4, depth=1, key=key)
+        self.critic = eqx.nn.MLP(1, 1, width_size=4, depth=2, key=key)
+
+    def value(self, obs):
+        return self.critic(obs)
+
+
+class GameActor(Actor):
+    actor: eqx.nn.MLP
+
+    def __init__(self, key: Array):
+        self.actor = eqx.nn.MLP(1, 2, width_size=4, depth=1, key=key)
 
     def logits(self, obs):
-        return self.policy(obs)
+        return self.actor(obs)
+
+
+class ActorCritic(NamedTuple):
+    actor: Actor
+    critic: Critic
 
 
 class SimplePolicyGradientAgent(eqx.Module):
-    actor: Actor
-    optim: optax.GradientTransformationExtraArgs
-    opt_state: optax.OptState
+    ac: ActorCritic
+
+    opt_state: Tuple[optax.OptState, optax.OptState]
 
 
 class RolloutState(NamedTuple):
@@ -160,31 +183,52 @@ class RolloutState(NamedTuple):
 
 
 class SimplePolicyGradientTrainer(eqx.Module):
+    optim: optax.GradientTransformation = eqx.field(static=True)
     env: Environment = eqx.field(static=True)
 
     env_n: int = eqx.field(static=True, default=8)
+    batch_n: int = eqx.field(static=True, default=64)
     step_n: int = eqx.field(static=True, default=128)
 
     lr: float = eqx.field(static=True, default=1e-3)
+
     discount: float = eqx.field(static=True, default=0.96)
+    lambda_: float = eqx.field(static=True, default=0.95)
 
-    def make_agent(self, actor: Actor) -> SimplePolicyGradientAgent:
-        optim = optax.adam(self.lr)
+    def __init__(self, **kwargs):
+        for key, value in kwargs.items():
+            setattr(self, key, value)
 
+        self.optim = optax.adam(self.lr)
+
+    def make_agent(
+        self,
+        key: Array,
+        actor: Callable[[Array], Actor],
+        critic: Callable[[Array], Critic],
+    ) -> SimplePolicyGradientAgent:
+        a, b = jax.random.split(key)
+        ac = ActorCritic(
+            actor=actor(a),
+            critic=critic(b),
+        )
         return SimplePolicyGradientAgent(
-            optim=optim,
-            actor=actor,
-            opt_state=optim.init(eqx.filter(actor, eqx.is_array)),
+            opt_state=(
+                self.optim.init(eqx.filter(ac.actor, eqx.is_inexact_array)),
+                self.optim.init(eqx.filter(ac.critic, eqx.is_inexact_array)),
+            ),
+            ac=ac,
         )
 
     def rollout(
-        self, rs: RolloutState, actor: Actor
+        self, rs: RolloutState, ac: ActorCritic
     ) -> Tuple[RolloutState, Transition]:
         def step(rs: RolloutState, _):
             key, state, obs = rs
             key, actionk, stepk = jax.random.split(key, 3)
 
-            logits = actor.logits(obs)
+            logits = ac.actor.logits(obs)
+            value = ac.critic.value(obs)
 
             dist = Categorical(logits=logits)
             action = dist.sample(seed=actionk)
@@ -194,7 +238,7 @@ class SimplePolicyGradientTrainer(eqx.Module):
             return RolloutState(key=key, state=state, obs=obsv), Transition(
                 observation=obs,
                 action=action,
-                value=None,
+                value=value,
                 reward=reward,
                 done=done,
             )
@@ -205,26 +249,29 @@ class SimplePolicyGradientTrainer(eqx.Module):
         self,
         rs: RolloutState,
         agent: SimplePolicyGradientAgent,
-    ) -> Tuple[RolloutState, Transition, Float[Array, "step_n"]]:
-        rs, transition = self.rollout(rs, agent.actor)
+    ) -> Tuple[
+        RolloutState, Transition, Float[Array, "step_n"], Float[Array, "step_n"]
+    ]:
+        rs, transition = self.rollout(rs, agent.ac)
 
-        def discounted_reward(prev, pair):
-            reward, cut = pair
-            reward = reward + cut * self.discount * prev
+        discount = (1.0 - transition.done.astype(jnp.float32)) * self.discount
+        values = jnp.concatenate(
+            [jnp.squeeze(transition.value), agent.ac.critic.value(rs.obs)]
+        )
+        deltas = transition.reward + discount * values[1:] - values[:-1]
 
-            return reward, reward
+        def compute(prev, pair):
+            delta, value, discount = pair
 
-        _, returns = jax.lax.scan(
-            discounted_reward,
-            0.0,
-            (
-                transition.reward,
-                1.0 - transition.done.astype(jnp.float32),
-            ),
-            reverse=True,
+            gae = delta + discount * self.lambda_ * prev
+
+            return gae, (gae, gae + value)
+
+        _, (advantage, returns) = jax.lax.scan(
+            compute, 0, (deltas, jnp.squeeze(transition.value), discount), reverse=True
         )
 
-        return rs, transition, returns
+        return rs, transition, advantage, returns
 
     def train_step(
         self,
@@ -235,39 +282,75 @@ class SimplePolicyGradientTrainer(eqx.Module):
         RolloutState,
         Float[Array, "..."],
     ]:
-        rs, transition, returns = jax.vmap(self.collect, in_axes=(0, None))(rs, agent)
+        rs, transition, advantage, returns = jax.vmap(self.collect, in_axes=(0, None))(
+            rs, agent
+        )
 
-        def compute_loss(actor, obs, action, reward):
+        def actor_loss(actor: Actor, obs, action, advantage):
             logits = jax.vmap(jax.vmap(actor.logits))(obs)
             log_p = Categorical(logits).log_prob(action)
 
-            return -(log_p * reward).mean(axis=-1).mean()
+            return -(log_p * advantage).mean(axis=-1).mean()
 
-        actor = agent.actor
-        value, grad = eqx.filter_value_and_grad(compute_loss)(
-            actor,
+        def critic_loss(critic: Critic, obs, returns):
+            values = jnp.squeeze(jax.vmap(jax.vmap(critic.value))(obs))
+
+            return ((values - returns) ** 2).mean()
+
+        actor_grad = eqx.filter_grad(actor_loss)(
+            agent.ac.actor,
             transition.observation,
             transition.action,
-            returns,
+            advantage,
         )
 
-        update, opt_state = agent.optim.update(
-            grad, agent.opt_state, eqx.filter(actor, eqx.is_array)
+        critic_grad = eqx.filter_grad(critic_loss)(
+            agent.ac.critic, transition.observation, returns
         )
-        actor = eqx.apply_updates(actor, update)
+
+        opt1, opt2 = agent.opt_state
+
+        actor_update, opt1 = self.optim.update(
+            actor_grad, opt1, eqx.filter(agent.ac.actor, eqx.is_inexact_array)
+        )
+        actor = eqx.apply_updates(agent.ac.actor, actor_update)
+
+        critic_update, opt2 = self.optim.update(
+            critic_grad, opt2, eqx.filter(agent.ac.critic, eqx.is_inexact_array)
+        )
+        critic = eqx.apply_updates(agent.ac.critic, critic_update)
 
         return (
             replace(
                 agent,
-                actor=actor,
-                opt_state=opt_state,
+                ac=ActorCritic(actor=actor, critic=critic),
+                opt_state=(opt1, opt2),
             ),
             rs,
-            returns,
+            transition.reward,
         )
 
+    def train_batch(
+        self, agent: SimplePolicyGradientAgent, rs: RolloutState
+    ) -> Tuple[SimplePolicyGradientAgent, RolloutState, Float[Array, "..."]]:
+        params, static = eqx.partition(agent, eqx.is_array)
+
+        def body(pair, _):
+            params, rs = pair
+
+            agent = eqx.combine(params, static)
+            agent, rs, r = self.train_step(rs, agent)
+            params = eqx.filter(agent, eqx.is_array)
+
+            return (params, rs), r
+
+        (params, rs), r = jax.lax.scan(body, (params, rs), length=self.batch_n)
+        agent = eqx.combine(params, static)
+
+        return agent, rs, r
+
     def train(
-        self, key: Array, agent: SimplePolicyGradientAgent
+        self, key: Array, agent: SimplePolicyGradientAgent, iterations: int = 128
     ) -> SimplePolicyGradientAgent:
         key, traink = jax.random.split(key)
 
@@ -275,11 +358,15 @@ class SimplePolicyGradientTrainer(eqx.Module):
 
         rs = RolloutState(key=jax.random.split(key, self.env_n), state=state, obs=obs)
 
-        train_step = eqx.filter_jit(self.train_step)
-        for i in (bar := tqdm(range(1000))):
-            agent, rs, r = train_step(rs, agent)
+        train_batch = eqx.filter_jit(self.train_batch)
 
-            bar.set_postfix({"returns": r.mean()})
+        mean = 0
+        for i in (bar := tqdm(range(0, iterations))):
+            agent, rs, r = train_batch(agent, rs)
+
+            mean = mean + (r.mean() - mean) / (i + 1)
+
+            bar.set_postfix({"avg_rewards": f"{mean:.3f}"})
 
         return agent
 
@@ -288,8 +375,8 @@ if __name__ == "__main__":
     key = jax.random.key(0)
     env = MyGame()
 
-    key, actork = jax.random.split(key)
+    key, subk = jax.random.split(key)
     trainer = SimplePolicyGradientTrainer(env=env)
-    agent = trainer.make_agent(actor=GameActor(key=actork))
+    agent = trainer.make_agent(subk, actor=GameActor, critic=GameCritic)
 
-    agent = trainer.train(key, agent)
+    agent = trainer.train(key, agent, iterations=128 * 2)
