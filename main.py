@@ -15,6 +15,9 @@ from typing import Generic, TypeVar, Callable, Sequence, NamedTuple, Tuple, Any
 from dataclasses import replace
 
 
+from PIL import Image, ImageDraw
+
+
 Observation = Array  # TypeVar("Observation")
 
 
@@ -92,47 +95,207 @@ class Environment(eqx.Module, Generic[TState]):
         raise NotImplementedError
 
 
-class GameState(NamedTuple):
-    theta: Float[Array, "..."]
+class CartPoleState(NamedTuple):
+    x: jnp.ndarray
+    x_dot: jnp.ndarray
+    theta: jnp.ndarray
+    theta_dot: jnp.ndarray
+    time: int = 0
 
 
-class MyGame(Environment[GameState]):
-    def reset(self, key):
-        theta = jax.random.uniform(
-            key=key,
-            shape=(1,),
-            maxval=jnp.pi / 2 + jnp.pi / 12,
-            minval=jnp.pi / 2 - jnp.pi / 12,
-            dtype=jnp.float32,
-        )
+class CartPole(Environment[CartPoleState]):
+    """
+    CartPole environment from OpenAI Gym.
+    """
 
-        state = GameState(theta=theta)
+    gravity: float = 9.8
+    masscart: float = 1.0
+    masspole: float = 0.1
+    length: float = 0.5
+    force_mag: float = 10.0
+    tau: float = 0.02
 
-        return state, theta
+    theta_threshold_radians: float = 12 * 2 * np.pi / 360
+    x_threshold: float = 2.4
+
+    max_episode_steps: int = 500
+
+    @property
+    def total_mass(self):
+        return self.masscart + self.masspole
+
+    @property
+    def polemass_length(self):
+        return self.masspole * self.length
 
     def step(self, key, state, action):
-        iota = state.theta - jnp.pi / 12 + action * jnp.pi / 6
-        iota = jnp.clip(iota, 0.0, jnp.pi)
+        action = jnp.squeeze(action)
+        force = self.force_mag * action - self.force_mag * (1 - action)
+        costheta = jnp.cos(state.theta)
+        sintheta = jnp.sin(state.theta)
 
-        state = GameState(theta=iota)
-        step = TimeStep(
-            reward=jnp.squeeze(self.reward(state.theta)),
-            done=jnp.squeeze(self.done(state.theta)),
+        temp = (
+            force + self.polemass_length * state.theta_dot**2 * sintheta
+        ) / self.total_mass
+        thetaacc = (self.gravity * sintheta - costheta * temp) / (
+            self.length * (4.0 / 3.0 - self.masspole * costheta**2 / self.total_mass)
+        )
+        xacc = temp - self.polemass_length * thetaacc * costheta / self.total_mass
+
+        x = state.x + self.tau * state.x_dot
+        x_dot = state.x_dot + self.tau * xacc
+        theta = state.theta + self.tau * state.theta_dot
+        theta_dot = state.theta_dot + self.tau * thetaacc
+
+        state = CartPoleState(
+            x=x,
+            x_dot=x_dot,
+            theta=theta,
+            theta_dot=theta_dot,
+            time=state.time + 1,
         )
 
-        return state, step, iota
+        timestep = TimeStep(
+            reward=self.get_reward(),
+            done=jnp.logical_or(self.get_terminated(state), self.get_truncated(state)),
+        )
 
-    def reward(self, theta: Array):
-        return 1 - jnp.abs(jnp.cos(theta))
+        return state, timestep, self.get_observation(state)
 
-    def done(self, theta: Array):
-        return jnp.logical_or(theta <= 0, theta >= jnp.pi)
+    def reset(self, key):
+        state_variables = jax.random.uniform(key, shape=(4,), minval=-0.05, maxval=0.05)
+        state = CartPoleState(
+            x=state_variables[0],
+            x_dot=state_variables[1],
+            theta=state_variables[2],
+            theta_dot=state_variables[3],
+        )
+        observation = self.get_observation(state)
+        return state, observation
 
-    def observation_space(self):
-        return Box(low=0, high=jnp.pi, shape=(1,))
+    def get_observation(self, state: CartPoleState) -> Array:
+        return jnp.array(
+            [state.x, state.x_dot, state.theta, state.theta_dot], dtype=jnp.float32
+        )
 
-    def action_space(self):
+    def get_reward(self):
+        return jnp.array(1.0)
+
+    def get_terminated(self, state: CartPoleState) -> Array:
+        return jnp.logical_or(
+            jnp.abs(state.x) > self.x_threshold,
+            jnp.abs(state.theta) > self.theta_threshold_radians,
+        )
+
+    def get_truncated(self, state: CartPoleState) -> bool:
+        return state.time >= self.max_episode_steps
+
+    def observation_space(self) -> Box:
+        high = jnp.array(
+            [
+                self.x_threshold * 2,
+                np.finfo(jnp.float32).max,
+                self.theta_threshold_radians * 2,
+                np.finfo(jnp.float32).max,
+            ]
+        )
+        return Box(
+            low=-high,
+            high=high,
+            shape=(4,),
+        )
+
+    def action_space(self) -> Discrete:
         return Discrete(2)
+
+    def render(self, state: CartPoleState):
+        """
+        Render the CartPole environment state as a PIL Image.
+
+        Args:
+            state: CartPoleState containing x, x_dot, theta, theta_dot
+
+        Returns:
+            PIL Image of the rendered cart-pole system
+        """
+        screen_width = 600
+        screen_height = 400
+
+        # Create white background
+        img = Image.new("RGB", (screen_width, screen_height), color=(255, 255, 255))
+        draw = ImageDraw.Draw(img)
+
+        # Calculate scaling and dimensions
+        world_width = self.x_threshold * 2
+        scale = screen_width / world_width
+        polewidth = 10.0
+        polelen = scale * (2 * self.length)
+        cartwidth = 50.0
+        cartheight = 30.0
+
+        # Extract state values (convert from JAX arrays to floats)
+        x = float(state.x)
+        theta = float(state.theta)
+
+        # Cart position
+        cartx = x * scale + screen_width / 2.0
+        carty = 100  # Fixed y position for cart
+
+        # Draw the track (horizontal line)
+        draw.line([(0, carty), (screen_width, carty)], fill=(0, 0, 0), width=2)
+
+        # Draw cart
+        l, r, t, b = -cartwidth / 2, cartwidth / 2, cartheight / 2, -cartheight / 2
+        cart_coords = [
+            (l + cartx, b + carty),
+            (l + cartx, t + carty),
+            (r + cartx, t + carty),
+            (r + cartx, b + carty),
+        ]
+        draw.polygon(cart_coords, fill=(0, 0, 0), outline=(0, 0, 0))
+
+        # Draw pole
+        axleoffset = cartheight / 4.0
+        l, r, t, b = (
+            -polewidth / 2,
+            polewidth / 2,
+            polelen - polewidth / 2,
+            -polewidth / 2,
+        )
+
+        # Rotate pole coordinates
+        pole_coords = []
+        for coord in [(l, b), (l, t), (r, t), (r, b)]:
+            # Rotate around origin
+            cos_theta = np.cos(-theta)
+            sin_theta = np.sin(-theta)
+            rotated_x = coord[0] * cos_theta - coord[1] * sin_theta
+            rotated_y = coord[0] * sin_theta + coord[1] * cos_theta
+            # Translate to cart position
+            final_x = rotated_x + cartx
+            final_y = rotated_y + carty + axleoffset
+            pole_coords.append((final_x, final_y))
+
+        draw.polygon(pole_coords, fill=(202, 152, 101), outline=(202, 152, 101))
+
+        # Draw axle (circle at joint)
+        axle_radius = int(polewidth / 2)
+        axle_center = (int(cartx), int(carty + axleoffset))
+        draw.ellipse(
+            [
+                (axle_center[0] - axle_radius, axle_center[1] - axle_radius),
+                (axle_center[0] + axle_radius, axle_center[1] + axle_radius),
+            ],
+            fill=(129, 132, 203),
+            outline=(129, 132, 203),
+        )
+
+        img = img.transpose(Image.Transpose.FLIP_TOP_BOTTOM)
+
+        # Flip vertically to match pygame's coordinate system
+        # img = img.transpose(Image.FLIP_TOP_BOTTOM)
+
+        return img
 
 
 class Transition(NamedTuple):
@@ -194,7 +357,7 @@ class GameCritic(Critic):
     critic: eqx.nn.MLP
 
     def __init__(self, key: Array):
-        self.critic = eqx.nn.MLP(1, 1, width_size=4, depth=2, key=key)
+        self.critic = eqx.nn.MLP(4, 1, width_size=4, depth=3, key=key)
 
     def value(self, obs):
         return self.critic(obs)
@@ -204,7 +367,7 @@ class GameActor(Actor):
     actor: eqx.nn.MLP
 
     def __init__(self, key: Array):
-        self.actor = eqx.nn.MLP(1, 4, width_size=4, depth=1, key=key)
+        self.actor = eqx.nn.MLP(4, 4, width_size=4, depth=1, key=key)
 
     def __call__(self, obs):
         return self.actor(obs)
@@ -334,7 +497,7 @@ class SimplePolicyGradientTrainer(eqx.Module, Generic[TState]):
     ) -> Tuple[
         SimplePolicyGradientAgent,
         RolloutState[TState],
-        Float[Array, "..."],
+        Transition,
     ]:
         rs, transition, advantage, returns = jax.vmap(self.collect, in_axes=(0, None))(
             rs, agent
@@ -381,12 +544,14 @@ class SimplePolicyGradientTrainer(eqx.Module, Generic[TState]):
                 opt_state=(opt1, opt2),
             ),
             rs,
-            transition.reward,
+            transition,
         )
 
     def train_cycle(
-        self, agent: SimplePolicyGradientAgent, rs: RolloutState[TState]
-    ) -> Tuple[SimplePolicyGradientAgent, RolloutState[TState], Float[Array, "..."]]:
+        self,
+        agent: SimplePolicyGradientAgent,
+        rs: RolloutState[TState],
+    ) -> Tuple[SimplePolicyGradientAgent, RolloutState[TState], Transition]:
         params, static = eqx.partition(agent, eqx.is_array)
 
         def body(pair, _):
@@ -404,7 +569,11 @@ class SimplePolicyGradientTrainer(eqx.Module, Generic[TState]):
         return agent, rs, r
 
     def train(
-        self, key: Array, agent: SimplePolicyGradientAgent, iterations: int = 128
+        self,
+        key: Array,
+        agent: SimplePolicyGradientAgent,
+        compute_metric: Callable[[Transition], dict],
+        iterations: int = 128,
     ) -> SimplePolicyGradientAgent:
         key, traink = jax.random.split(key)
 
@@ -414,23 +583,52 @@ class SimplePolicyGradientTrainer(eqx.Module, Generic[TState]):
 
         train_cycle = eqx.filter_jit(self.train_cycle)
 
-        mean = 0
         for i in (bar := tqdm(range(0, iterations))):
-            agent, rs, r = train_cycle(agent, rs)
+            agent, rs, transition = train_cycle(agent, rs)
 
-            mean = mean + (r.mean() - mean) / (i + 1)
-
-            bar.set_postfix({"avg_rewards": f"{mean:.3f}"})
+            bar.set_postfix(compute_metric(transition))
 
         return agent
 
 
 if __name__ == "__main__":
     key = jax.random.key(0)
-    env = MyGame()
+    env = CartPole()
 
     key, subk = jax.random.split(key)
     trainer = SimplePolicyGradientTrainer(env=env)
     agent = trainer.make_agent(subk, actor=GameActor, critic=GameCritic)
 
-    agent = trainer.train(key, agent, iterations=128 * 2)
+    def compute_metric(t: Transition):
+        return {"early": t.done.sum()}
+
+    agent = trainer.train(key, agent, iterations=128, compute_metric=compute_metric)
+
+    if True:
+        frames = []
+        key = jax.random.key(67)
+        key, resetk = jax.random.split(key)
+        state, obs = env.reset(resetk)
+
+        done = jnp.array(False)
+
+        frames.append(state)
+        while not done.item():
+            _, dist = agent.ac.actor(obs)
+
+            key, actionk, stepk = jax.random.split(key, 3)
+            action = dist.sample(seed=actionk)
+            state, (reward, done), obs = env.step(stepk, state, action)
+
+            frames.append(state)
+
+        frames = [env.render(state) for state in frames]
+
+        duration = int(1000 / 60)
+        frames[0].save(
+            "/sdcard/ff.gif",
+            save_all=True,
+            append_images=frames[1:],
+            duration=duration,
+            loop=0,
+        )
