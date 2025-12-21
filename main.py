@@ -1,6 +1,7 @@
 import jax
 import equinox as eqx
 import jax.numpy as jnp
+import numpy as np
 
 from tqdm import tqdm
 
@@ -156,26 +157,35 @@ class Critic(eqx.Module):
 
 
 class ActorAutomatic(eqx.Module):
-    space: Space = eqx.field()
+    nvec: Sequence[int] = eqx.field(static=True)
     actor: Actor
     head: eqx.nn.Linear
 
     def __init__(
         self, key: Array, actor: Actor, space: Space, obs_shape: Sequence[int]
     ):
-        assert isinstance(space, Discrete)
+        assert isinstance(space, Discrete) or isinstance(space, MultiDiscrete)
 
         self.actor = actor
-        self.space = space
 
         output = jax.eval_shape(
             self.actor, jax.ShapeDtypeStruct(obs_shape, jnp.float32)
         )
+        self.nvec = [space.n] if isinstance(space, Discrete) else space.nvec
 
-        self.head = eqx.nn.Linear(output.size, self.space.n, key=key)
+        self.head = eqx.nn.Linear(output.size, sum(self.nvec), key=key)
 
     def __call__(self, obs: Observation):
         logits = self.head(self.actor(obs))
+
+        nvec = np.array(self.nvec)
+        y, x = len(nvec), nvec.max()
+        zeros = jnp.zeros((y, x))
+
+        rows = jnp.repeat(jnp.arange(y), nvec)
+        cols = jnp.arange(nvec.sum()) - jnp.repeat(jnp.cumsum(nvec) - nvec, nvec)
+
+        logits = zeros.at[rows, cols].set(logits)
 
         return logits, Categorical(logits=logits)
 
@@ -334,7 +344,7 @@ class SimplePolicyGradientTrainer(eqx.Module, Generic[TState]):
             _, dist = jax.vmap(jax.vmap(actor))(obs)
             log_p = dist.log_prob(action)
 
-            return -(log_p * advantage).mean(axis=-1).mean()
+            return -(log_p * jnp.expand_dims(advantage, axis=-1)).mean(axis=-1).mean()
 
         def critic_loss(critic: Critic, obs, returns):
             values = jnp.squeeze(jax.vmap(jax.vmap(critic.value))(obs))
