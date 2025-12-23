@@ -19,7 +19,6 @@ from typing import (
     TypeAlias,
     NamedTuple,
     Tuple,
-    Any,
 )
 
 from dataclasses import replace
@@ -29,10 +28,11 @@ from PIL import Image, ImageDraw
 
 
 Observation: TypeAlias = PyTree[Float[Array, "..."]]  # TypeVar("Observation")
+Action: TypeAlias = PyTree[Int[Array, "..."]]
 
 
 class Space:
-    shape: Tuple[int, ...]
+    shape: Sequence[int]
     dtype: DTypeLike
 
 
@@ -41,7 +41,7 @@ class Box(Space):
         self,
         low,
         high,
-        shape: Tuple[int, ...],
+        shape: Sequence[int],
     ):
         self.low = low
         self.high = high
@@ -62,7 +62,7 @@ class MultiDiscrete(Space):
 class Discrete(Space):
     def __init__(self, n: int):
         self.n = n
-        self.shape = ()
+        self.shape = (1,)
         self.dtype = jnp.int32
 
 
@@ -76,7 +76,7 @@ class TimeStep(NamedTuple):
 
 class Environment(eqx.Module, Generic[TState]):
     def autostep(
-        self, key: Array, state: TState, action: Any
+        self, key: Array, state: TState, action: Action
     ) -> Tuple[TState, TimeStep, Observation]:
         key, stepk = jax.random.split(key)
         state, step, obs = self.step(stepk, state, action)
@@ -94,7 +94,7 @@ class Environment(eqx.Module, Generic[TState]):
         raise NotImplementedError
 
     def step(
-        self, key: Array, state: TState, action: Any
+        self, key: Array, state: TState, action: Action
     ) -> Tuple[TState, TimeStep, Observation]:
         raise NotImplementedError
 
@@ -309,7 +309,7 @@ class CartPole(Environment[CartPoleState]):
 class Transition(NamedTuple):
     observation: Observation
     reward: Float[Array, "..."]
-    action: Int[Array, "..."]
+    action: Action
     value: Float[Array, "..."]
     done: Bool[Array, "..."]
 
