@@ -11,12 +11,12 @@ import optax
 
 from jaxtyping import PyTree, Array, Float, Bool, Int, DTypeLike
 from typing import (
-    Union,
     Mapping,
     Generic,
     TypeVar,
     Callable,
     Sequence,
+    TypeAlias,
     NamedTuple,
     Tuple,
     Any,
@@ -28,7 +28,7 @@ from dataclasses import replace
 from PIL import Image, ImageDraw
 
 
-Observation = PyTree[Array]  # TypeVar("Observation")
+Observation: TypeAlias = PyTree[Float[Array, "..."]]  # TypeVar("Observation")
 
 
 class Space:
@@ -98,10 +98,10 @@ class Environment(eqx.Module, Generic[TState]):
     ) -> Tuple[TState, TimeStep, Observation]:
         raise NotImplementedError
 
-    def observation_space(self) -> Union[Space, Mapping[str, Space]]:
+    def observation_space(self) -> PyTree[Space]:
         raise NotImplementedError
 
-    def action_space(self) -> Space:
+    def action_space(self) -> PyTree[Space]:
         raise NotImplementedError
 
 
@@ -139,7 +139,7 @@ class CartPole(Environment[CartPoleState]):
         return self.masspole * self.length
 
     def step(self, key, state, action):
-        action = jnp.squeeze(action)
+        action = jnp.squeeze(action["swing"])
         force = self.force_mag * action - self.force_mag * (1 - action)
         costheta = jnp.cos(state.theta)
         sintheta = jnp.sin(state.theta)
@@ -205,14 +205,16 @@ class CartPole(Environment[CartPoleState]):
 
     def observation_space(self):
         return {
-            "a1": Box(0, 0, shape=(1,)),
-            "a2": Box(0, 0, shape=(1,)),
-            "a3": Box(0, 0, shape=(1,)),
-            "a4": Box(0, 0, shape=(1,)),
+            "obs": {
+                "a1": Box(0, 0, shape=(1,)),
+                "a2": Box(0, 0, shape=(1,)),
+                "a3": Box(0, 0, shape=(1,)),
+                "a4": Box(0, 0, shape=(1,)),
+            }
         }
 
-    def action_space(self) -> Discrete:
-        return Discrete(2)
+    def action_space(self):
+        return {"swing": Discrete(2)}
 
     def render(self, state: CartPoleState):
         """
@@ -312,11 +314,8 @@ class Transition(NamedTuple):
     done: Bool[Array, "..."]
 
 
-ActorLogits = Float[Array, "n"]
-
-
 class Actor(eqx.Module):
-    def __call__(self, obs: Observation) -> ActorLogits:
+    def __call__(self, obs: Observation) -> Float[Array, "n"]:
         raise NotImplementedError
 
 
@@ -328,43 +327,55 @@ class Critic(eqx.Module):
 class Interpreter(eqx.Module):
     obs_out_features: int = eqx.field(static=True)
     action_out_features: int = eqx.field(static=True)
-    nvec: Sequence[int] = eqx.field(static=True)
 
-    def __init__(self, action: Space, obs: Union[Space, Mapping[str, Space]]):
-        self.obs_out_features = 0
+    nvec: Sequence[Sequence[int]] = eqx.field(static=True)
+    treedef: dict = eqx.field(static=True)
 
-        if isinstance(obs, Space):
-            assert isinstance(obs, Box)
-            assert len(obs.shape) == 1
+    def __init__(self, action: PyTree[Space], obs: PyTree[Space]):
+        assert jax.tree.all(
+            jax.tree.map(lambda s: isinstance(s, Box) and len(s.shape) == 1, obs)
+        )
 
-            self.obs_out_features = obs.shape[0]
-        else:
-            for key, space in obs.items():
-                assert isinstance(space, Box)
-                assert len(space.shape) == 1
+        self.obs_out_features = sum(sum(x.shape) for x in jax.tree.leaves(obs))
 
-                self.obs_out_features += space.shape[0]
+        assert jax.tree.all(
+            jax.tree.map(
+                lambda s: isinstance(s, Discrete) or isinstance(s, MultiDiscrete),
+                action,
+            )
+        )
 
-        assert isinstance(action, Discrete) or isinstance(action, MultiDiscrete)
-        self.nvec = [action.n] if isinstance(action, Discrete) else action.nvec
-        self.action_out_features = sum(self.nvec)
+        leaves, _ = jax.tree.flatten(action)
+        nvec = jax.tree.map(
+            lambda x: [x.n] if isinstance(x, Discrete) else x.nvec, leaves
+        )
+
+        self.action_out_features = sum(sum(x) for x in nvec)
+        self.nvec = nvec
+        self.treedef = dict(action)
 
     def observation(self, obs: PyTree[Observation]) -> Float[Array, "..."]:
         return jnp.squeeze(jnp.stack(jax.tree.leaves(obs)))
 
-    def action(self, logits: Float[Array, "n"]):
+    def action(self, logits: Float[Array, "n"]) -> PyTree[Float[Array, "n"]]:  # noqa: F821
         assert logits.shape[0] == self.action_out_features
 
-        nvec = np.array(self.nvec)
-        y, x = len(nvec), nvec.max()
-        grid = jnp.full((y, x), -jnp.inf, dtype=jnp.float32)
+        leaves = []
+        logits_ = jax.lax.split(logits, [sum(x) for x in self.nvec])
 
-        rows = jnp.repeat(jnp.arange(y), nvec)
-        cols = jnp.arange(nvec.sum()) - jnp.repeat(jnp.cumsum(nvec) - nvec, nvec)
+        for v, logits in zip(self.nvec, logits_):
+            nvec = np.array(v)
+            y, x = len(nvec), nvec.max()
+            grid = jnp.full((y, x), -jnp.inf, dtype=jnp.float32)
 
-        logits = grid.at[rows, cols].set(logits)
+            rows = np.repeat(np.arange(y), nvec)
+            cols = np.arange(nvec.sum()) - np.repeat(np.cumsum(nvec) - nvec, nvec)
 
-        return logits, Categorical(logits=logits)
+            logits = grid.at[rows, cols].set(logits)
+
+            leaves.append(logits)
+
+        return jax.tree.unflatten(jax.tree.structure(self.treedef), leaves)
 
 
 class GameCritic(Critic):
@@ -426,11 +437,11 @@ class ActorCritic(eqx.Module):
             output.size, interpreter.action_out_features, key=key
         )
 
-        actor = ActorContainer(actor=actor, logits_head=logits_head)
+        container = ActorContainer(actor=actor, logits_head=logits_head)
 
-        return ActorCritic(actor=actor, critic=critic, interpreter=interpreter)
+        return ActorCritic(actor=container, critic=critic, interpreter=interpreter)
 
-    def action(self, obs: PyTree[Observation]) -> Tuple[Float[Array, "n"], Categorical]:
+    def action(self, obs: PyTree[Observation]) -> PyTree[Categorical]:
         obs = self.interpreter.observation(obs)
         logits = self.actor(obs)
 
@@ -497,8 +508,18 @@ class SimplePolicyGradientTrainer(eqx.Module, Generic[TState]):
             key, state, obs = rs
             key, actionk, stepk = jax.random.split(key, 3)
 
-            logits, dist = ac.action(obs)
-            action = dist.sample(seed=actionk)
+            logits = ac.action(obs)
+            actkey = jax.tree.unflatten(
+                jax.tree.structure(logits),
+                jax.random.split(actionk, len(jax.tree.leaves(logits))),
+            )
+
+            action = jax.tree.map(
+                lambda logits, key: Categorical(logits=logits).sample(seed=key),
+                logits,
+                actkey,
+            )
+
             value = ac.value(obs)
 
             state, (reward, done), obsv = self.env.autostep(stepk, state, action)
@@ -554,11 +575,18 @@ class SimplePolicyGradientTrainer(eqx.Module, Generic[TState]):
             rs, agent
         )
 
-        def actor_loss(ac: ActorCritic, obs, action, advantage):
-            _, dist = jax.vmap(jax.vmap(ac.action))(obs)
-            log_p = dist.log_prob(action)
+        def actor_loss(ac: ActorCritic, obs, action: PyTree, advantage):
+            logits = jax.vmap(jax.vmap(ac.action))(obs)
+            log_p = jax.tree.map(
+                lambda logits, action: Categorical(logits=logits).log_prob(action),
+                logits,
+                action,
+            )
 
-            return -(log_p * jnp.expand_dims(advantage, axis=-1)).mean(axis=-1).mean()
+            adv = jnp.expand_dims(advantage, axis=-1)
+            losses = jax.tree.map(lambda x: x * adv, log_p)
+
+            return -jnp.array(jax.tree.leaves(losses)).mean()
 
         def critic_loss(ac: ActorCritic, obs, returns):
             values = jnp.squeeze(jax.vmap(jax.vmap(ac.value))(obs))
@@ -652,36 +680,38 @@ if __name__ == "__main__":
     trainer = SimplePolicyGradientTrainer(env=env)
     agent = trainer.make_agent(subk, actor=GameActor, critic=GameCritic)
 
+    # print(agent.ac.interpreter.action(jnp.arange(2)))
+    # exit(0)
+
     def compute_metric(t: Transition):
         return {"early": t.done.sum()}
 
     agent = trainer.train(key, agent, iterations=128, compute_metric=compute_metric)
 
-    if True:
-        frames = []
-        key = jax.random.key(67)
-        key, resetk = jax.random.split(key)
-        state, obs = env.reset(resetk)
+    frames = []
+    key = jax.random.key(67)
+    key, resetk = jax.random.split(key)
+    state, obs = env.reset(resetk)
 
-        done = jnp.array(False)
+    done = jnp.array(False)
+
+    frames.append(state)
+    while not done.item():
+        logits = agent.ac.action(obs)
+        action = jax.tree.map(jnp.argmax, logits)
+
+        key, stepk = jax.random.split(key)
+        state, (reward, done), obs = env.step(stepk, state, action)
 
         frames.append(state)
-        while not done.item():
-            _, dist = agent.ac.action(obs)
 
-            key, actionk, stepk = jax.random.split(key, 3)
-            action = dist.sample(seed=actionk)
-            state, (reward, done), obs = env.step(stepk, state, action)
+    frames = [env.render(state) for state in frames]
 
-            frames.append(state)
-
-        frames = [env.render(state) for state in frames]
-
-        duration = int(1000 / 60)
-        frames[0].save(
-            "/sdcard/ff.gif",
-            save_all=True,
-            append_images=frames[1:],
-            duration=duration,
-            loop=0,
-        )
+    duration = int(1000 / 30)
+    frames[0].save(
+        "/sdcard/ff.gif",
+        save_all=True,
+        append_images=frames[1:],
+        duration=duration,
+        loop=0,
+    )
