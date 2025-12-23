@@ -18,6 +18,7 @@ from typing import (
     Sequence,
     TypeAlias,
     NamedTuple,
+    Type,
     Tuple,
 )
 
@@ -497,29 +498,42 @@ class Transition(NamedTuple):
 
 
 class Actor(eqx.Module):
+    def __init__(self, key: Array, in_features: int):
+        pass
+
     def __call__(self, obs: Observation) -> Float[Array, "n"]:
         raise NotImplementedError
 
 
 class Critic(eqx.Module):
+    def __init__(self, key: Array, in_features: int):
+        pass
+
     def __call__(self, obs: Observation) -> Float[Array, "1"]:
         raise NotImplementedError
 
 
-class Interpreter(eqx.Module):
-    obs_out_features: int = eqx.field(static=True)
-    action_out_features: int = eqx.field(static=True)
+class ObservationInterpreter(eqx.Module):
+    out_features: int = eqx.field(static=True)
 
-    nvec: Sequence[Sequence[int]] = eqx.field(static=True)
-    treedef: dict = eqx.field(static=True)
-
-    def __init__(self, action: PyTree[Space], obs: PyTree[Space]):
+    def __init__(self, obs: PyTree[Space]):
         assert jax.tree.all(
             jax.tree.map(lambda s: isinstance(s, Box) and len(s.shape) == 1, obs)
         )
 
-        self.obs_out_features = sum(sum(x.shape) for x in jax.tree.leaves(obs))
+        self.out_features = sum(sum(x.shape) for x in jax.tree.leaves(obs))
 
+    def interpret(self, obs: PyTree[Observation]) -> Float[Array, "..."]:
+        return jnp.squeeze(jnp.stack(jax.tree.leaves(obs)))
+
+
+class ActionInterpreter(eqx.Module):
+    out_features: int = eqx.field(static=True)
+
+    nvec: Sequence[Sequence[int]] = eqx.field(static=True)
+    treedef: dict = eqx.field(static=True)
+
+    def __init__(self, action: PyTree[Space]):
         assert jax.tree.all(
             jax.tree.map(
                 lambda s: isinstance(s, Discrete) or isinstance(s, MultiDiscrete),
@@ -532,15 +546,12 @@ class Interpreter(eqx.Module):
             lambda x: [x.n] if isinstance(x, Discrete) else x.nvec, leaves
         )
 
-        self.action_out_features = sum(sum(x) for x in nvec)
+        self.out_features = sum(sum(x) for x in nvec)
         self.nvec = nvec
         self.treedef = dict(action)
 
-    def observation(self, obs: PyTree[Observation]) -> Float[Array, "..."]:
-        return jnp.squeeze(jnp.stack(jax.tree.leaves(obs)))
-
-    def action(self, logits: Float[Array, "n"]) -> PyTree[Float[Array, "n"]]:  # noqa: F821
-        assert logits.shape[0] == self.action_out_features
+    def interpret(self, logits: Float[Array, "n"]) -> PyTree[Float[Array, "n"]]:  # noqa: F821
+        assert logits.shape[0] == self.out_features
 
         leaves = []
         logits_ = jax.lax.split(logits, [sum(x) for x in self.nvec])
@@ -581,60 +592,62 @@ class PongActor(Actor):
 
 
 class ActorContainer(eqx.Module):
+    observation: ObservationInterpreter = eqx.field(static=True)
+    action: ActionInterpreter = eqx.field(static=True)
+
     actor: Actor
-    logits_head: eqx.nn.Linear
+    head: eqx.nn.Linear
 
-    def __call__(self, obs: Float[Array, "..."]):
-        return self.logits_head(self.actor(obs))
-
-
-class ActorCritic(eqx.Module):
-    actor: ActorContainer
-    critic: Critic
-
-    interpreter: Interpreter
-
-    @staticmethod
-    def make(
+    def __init__(
+        self,
         key: Array,
-        make_actor: Callable[[Array, int], Actor],
-        make_critic: Callable[[Array, int], Critic],
-        env: Environment,
-    ) -> "ActorCritic":
-        interpreter = Interpreter(
-            action=env.action_space(),
-            obs=env.observation_space(),
-        )
+        mactor: Type[Actor],
+        observation_space: PyTree[Space],
+        action_space: PyTree[Space],
+    ):
+        self.observation = ObservationInterpreter(observation_space)
+        self.action = ActionInterpreter(action_space)
 
-        key, actork, critick = jax.random.split(key, 3)
-
-        critic = make_critic(critick, interpreter.obs_out_features)
-        actor = make_actor(actork, interpreter.obs_out_features)
+        self.actor = mactor(key=key, in_features=self.observation.out_features)
 
         output = jax.eval_shape(
-            actor,
-            jax.ShapeDtypeStruct((interpreter.obs_out_features,), jnp.float32),
-        )
-        logits_head = eqx.nn.Linear(
-            output.size, interpreter.action_out_features, key=key
+            self.actor,
+            jax.ShapeDtypeStruct((self.observation.out_features,), jnp.float32),
         )
 
-        container = ActorContainer(actor=actor, logits_head=logits_head)
+        self.head = eqx.nn.Linear(output.size, self.action.out_features, key=key)
 
-        return ActorCritic(actor=container, critic=critic, interpreter=interpreter)
+    def __call__(self, obs: Float[Array, "..."]):
+        obs = self.observation.interpret(obs)
+        logits = self.head(self.actor(obs))
 
-    def action(self, obs: PyTree[Observation]) -> PyTree[Categorical]:
-        obs = self.interpreter.observation(obs)
-        logits = self.actor(obs)
+        return self.action.interpret(logits)
 
-        return self.interpreter.action(logits)
 
-    def value(self, obs: PyTree[Observation]) -> Float[Array, "1"]:
-        obs = self.interpreter.observation(obs)
+class CriticContainer(eqx.Module):
+    observation: ObservationInterpreter = eqx.field(static=True)
+    critic: Critic
+
+    def __init__(
+        self, key: Array, mcritic: Type[Critic], observation_space: PyTree[Space]
+    ):
+        self.observation = ObservationInterpreter(observation_space)
+        self.critic = mcritic(key=key, in_features=self.observation.out_features)
+
+    def __call__(self, obs: Float[Array, "..."]):
+        obs = self.observation.interpret(obs)
+
         return self.critic(obs)
 
 
-RLAgent = TypeVar("RLAgent")
+class _RLAgent(eqx.Module):
+    actor: ActorContainer
+    critic: CriticContainer
+
+    opt: PyTree[optax.OptState]
+
+
+RLAgent = TypeVar("RLAgent", bound=_RLAgent)
 
 
 class RolloutState(NamedTuple, Generic[TState]):
@@ -645,6 +658,7 @@ class RolloutState(NamedTuple, Generic[TState]):
 
 class RLTrainer(eqx.Module, Generic[TState, RLAgent]):
     env: Environment[TState] = eqx.field(static=True)
+    optim: optax.GradientTransformation = eqx.field(static=True)
 
     env_n: int = eqx.field(static=True, default=8)
     cycle_n: int = eqx.field(static=True, default=64)
@@ -653,13 +667,34 @@ class RLTrainer(eqx.Module, Generic[TState, RLAgent]):
     def make_agent(self, key: Array, *args, **kwargs) -> RLAgent:
         raise NotImplementedError
 
-    def action_value(self, key: Array, agent: RLAgent, obs):
+    def gradient(
+        self, rs: RolloutState[TState], transition: Transition, agent: RLAgent
+    ) -> PyTree:
         raise NotImplementedError
 
     def train_step(
         self, rs: RolloutState[TState], agent: RLAgent
     ) -> Tuple[RolloutState[TState], RLAgent]:
-        raise NotImplementedError
+        rs, transition = jax.vmap(self.rollout, in_axes=(0, None))(rs, agent)
+
+        gradient = self.gradient(rs, transition, agent)
+
+        def update(model, opt, grad):
+            updates, opt = self.optim.update(
+                grad, opt, eqx.filter(model, eqx.is_inexact_array)
+            )
+
+            return eqx.apply_updates(model, updates), opt
+
+        result = {
+            k: update(getattr(agent, k), agent.opt[k], gradient[k])
+            for k in ["actor", "critic"]
+        }
+
+        ac = {k: a for k, (a, _) in result.items()}
+        opt = {k: opt for k, (_, opt) in result.items()}
+
+        return rs, replace(agent, **ac, opt=opt)
 
     def rollout(
         self, rs: RolloutState[TState], agent: RLAgent
@@ -668,7 +703,20 @@ class RLTrainer(eqx.Module, Generic[TState, RLAgent]):
             key, state, obs = rs
             key, actionk, stepk = jax.random.split(key, 3)
 
-            action, value = self.action_value(actionk, agent, obs)
+            logits = agent.actor(obs)
+            value = agent.critic(obs)
+
+            actkey = jax.tree.unflatten(
+                jax.tree.structure(logits),
+                jax.random.split(actionk, len(jax.tree.leaves(logits))),
+            )
+
+            action = jax.tree.map(
+                lambda logits, key: Categorical(logits=logits).sample(seed=key),
+                logits,
+                actkey,
+            )
+
             state, (reward, done), obsv = self.env.autostep(stepk, state, action)
 
             return RolloutState(key=key, state=state, obs=obsv), Transition(
@@ -719,58 +767,64 @@ class RLTrainer(eqx.Module, Generic[TState, RLAgent]):
         return agent
 
 
-class SimplePolicyGradientAgent(eqx.Module):
-    ac: ActorCritic
-
-    opt_state: Tuple[optax.OptState, optax.OptState]
+class SPGAgent(_RLAgent):
+    pass
 
 
-class SimplePolicyGradientTrainer(RLTrainer[TState, SimplePolicyGradientAgent]):
-    optim: optax.GradientTransformation = eqx.field(static=True, default=None)
-
-    lr: float = eqx.field(static=True, default=1e-3)
-
+class SimplePolicyGradientTrainer(RLTrainer[TState, SPGAgent], Generic[TState]):
     discount: float = eqx.field(static=True, default=0.96)
     lambda_: float = eqx.field(static=True, default=0.95)
 
-    def __init__(self, env: Environment[TState], **kwargs):
-        self.env = env
-
-        for key, value in kwargs.items():
-            setattr(self, key, value)
-
-        self.optim = optax.adam(self.lr)
-
     def make_agent(
-        self,
-        key: Array,
-        actor: Callable[[Array, int], Actor],
-        critic: Callable[[Array, int], Critic],
-    ) -> SimplePolicyGradientAgent:
-        ac = ActorCritic.make(key, actor, critic, self.env)
+        self, key: Array, mactor: Type[Actor], mcritic: Type[Critic]
+    ) -> SPGAgent:
+        a, b = jax.random.split(key)
 
-        return SimplePolicyGradientAgent(
-            opt_state=(
-                self.optim.init(eqx.filter(ac.actor, eqx.is_inexact_array)),
-                self.optim.init(eqx.filter(ac.critic, eqx.is_inexact_array)),
-            ),
-            ac=ac,
+        actor = ActorContainer(
+            a, mactor, self.env.observation_space(), self.env.action_space()
+        )
+        critic = CriticContainer(a, mcritic, self.env.observation_space())
+
+        return SPGAgent(
+            actor=actor,
+            critic=critic,
+            opt={
+                "actor": self.optim.init(eqx.filter(actor, eqx.is_inexact_array)),
+                "critic": self.optim.init(eqx.filter(critic, eqx.is_inexact_array)),
+            },
         )
 
-    def action_value(self, key, agent, obs):
-        logits = agent.ac.action(obs)
-        actkey = jax.tree.unflatten(
-            jax.tree.structure(logits),
-            jax.random.split(key, len(jax.tree.leaves(logits))),
+    def gradient(self, rs, transition, agent):
+        advantage, returns = jax.vmap(self.compute_advantage_and_returns)(
+            transition, jax.vmap(agent.critic)(rs.obs)
         )
 
-        action = jax.tree.map(
-            lambda logits, key: Categorical(logits=logits).sample(seed=key),
-            logits,
-            actkey,
-        )
+        @eqx.filter_grad
+        def actor_loss(actor: ActorContainer, obs, action: PyTree, advantage):
+            logits = jax.vmap(jax.vmap(actor))(obs)
+            log_p = jax.tree.map(
+                lambda logits, action: Categorical(logits=logits).log_prob(action),
+                logits,
+                action,
+            )
 
-        return action, agent.ac.value(obs)
+            adv = jnp.expand_dims(advantage, axis=-1)
+            losses = jax.tree.map(lambda x: x * adv, log_p)
+
+            return -jnp.array(jax.tree.leaves(losses)).mean()
+
+        @eqx.filter_grad
+        def critic_loss(critic: CriticContainer, obs, returns):
+            values = jnp.squeeze(jax.vmap(jax.vmap(critic))(obs))
+
+            return ((values - returns) ** 2).mean()
+
+        actor_grad = actor_loss(
+            agent.actor, transition.observation, transition.action, advantage
+        )
+        critic_grad = critic_loss(agent.critic, transition.observation, returns)
+
+        return {"actor": actor_grad, "critic": critic_grad}
 
     def compute_advantage_and_returns(
         self, transition: Transition, bootstrap: Float[Array, "1"]
@@ -792,73 +846,16 @@ class SimplePolicyGradientTrainer(RLTrainer[TState, SimplePolicyGradientAgent]):
 
         return advantage, returns
 
-    def train_step(
-        self, rs: RolloutState[TState], agent: SimplePolicyGradientAgent
-    ) -> Tuple[RolloutState[TState], SimplePolicyGradientAgent]:
-        rs, transition = jax.vmap(self.rollout, in_axes=(0, None))(rs, agent)
-        advantage, returns = jax.vmap(self.compute_advantage_and_returns)(
-            transition, jax.vmap(agent.ac.value)(rs.obs)
-        )
-
-        def actor_loss(ac: ActorCritic, obs, action: PyTree, advantage):
-            logits = jax.vmap(jax.vmap(ac.action))(obs)
-            log_p = jax.tree.map(
-                lambda logits, action: Categorical(logits=logits).log_prob(action),
-                logits,
-                action,
-            )
-
-            adv = jnp.expand_dims(advantage, axis=-1)
-            losses = jax.tree.map(lambda x: x * adv, log_p)
-
-            return -jnp.array(jax.tree.leaves(losses)).mean()
-
-        def critic_loss(ac: ActorCritic, obs, returns):
-            values = jnp.squeeze(jax.vmap(jax.vmap(ac.value))(obs))
-
-            return ((values - returns) ** 2).mean()
-
-        actor_grad = eqx.filter_grad(actor_loss)(
-            agent.ac,
-            transition.observation,
-            transition.action,
-            advantage,
-        )
-        actor_grad = actor_grad.actor
-
-        critic_grad = eqx.filter_grad(critic_loss)(
-            agent.ac, transition.observation, returns
-        )
-        critic_grad = critic_grad.critic
-
-        opt1, opt2 = agent.opt_state
-
-        actor_update, opt1 = self.optim.update(
-            actor_grad, opt1, eqx.filter(agent.ac.actor, eqx.is_inexact_array)
-        )
-        actor = eqx.apply_updates(agent.ac.actor, actor_update)
-
-        critic_update, opt2 = self.optim.update(
-            critic_grad, opt2, eqx.filter(agent.ac.critic, eqx.is_inexact_array)
-        )
-        critic = eqx.apply_updates(agent.ac.critic, critic_update)
-
-        return rs, replace(
-            agent,
-            ac=replace(agent.ac, actor=actor, critic=critic),
-            opt_state=(opt1, opt2),
-        )
-
 
 if __name__ == "__main__":
     key = jax.random.key(0)
     env = CartPole()
 
     key, subk = jax.random.split(key)
-    trainer = SimplePolicyGradientTrainer(env=env)
-    agent = trainer.make_agent(subk, actor=PongActor, critic=PongCritic)
+    trainer = SimplePolicyGradientTrainer(env=env, optim=optax.adam(1e-3))
+    agent = trainer.make_agent(subk, PongActor, PongCritic)
 
-    agent = trainer.train(key, agent, iterations=16)
+    agent = trainer.train(key, agent, iterations=64)
 
     frames = []
     key = jax.random.key(67)
@@ -869,7 +866,7 @@ if __name__ == "__main__":
 
     frames.append(state)
     while not done.item():
-        logits = agent.ac.action(obs)
+        logits = agent.actor(obs)
         action = jax.tree.map(jnp.argmax, logits)
 
         key, stepk = jax.random.split(key)
