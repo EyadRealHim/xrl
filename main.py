@@ -105,6 +105,188 @@ class Environment(eqx.Module, Generic[TState]):
         raise NotImplementedError
 
 
+class ParallelEnvironment(Environment[TState]):
+    def autostep(
+        self, key: Array, state: TState, action: Mapping[str, Action]
+    ) -> Tuple[TState, TimeStep, Mapping[str, Observation]]:
+        return super().autostep(key=key, state=state, action=action)
+
+    def reset(self, key: Array) -> Tuple[TState, Mapping[str, Observation]]:
+        raise NotImplementedError
+
+    def step(
+        self, key: Array, state: TState, action: Mapping[str, Action]
+    ) -> Tuple[TState, TimeStep, Mapping[str, Observation]]:
+        raise NotImplementedError
+
+    def observation_space(self) -> Mapping[str, PyTree[Space]]:
+        raise NotImplementedError
+
+    def action_space(self) -> Mapping[str, PyTree[Space]]:
+        raise NotImplementedError
+
+
+class PongState(NamedTuple):
+    ys: Float[Array, "2"]
+    ball_velocity: Float[Array, "2"]
+    ball_position: Float[Array, "2"]
+
+
+class Pong(ParallelEnvironment[PongState]):
+    width: int = 800
+    height: int = 600
+
+    paddle_height: float = 40.0
+    paddle_width: float = 10.0
+
+    ball_radius: float = 5.0
+    ball_speed: float = 10.0
+
+    paddle_speed: float = 20.0
+
+    xoff = 20
+
+    def observation_space(self):
+        return {
+            "alpha": {
+                "enemy": Box(-1, 1, shape=(1,)),
+                "mine": Box(-1, 1, shape=(1,)),
+                "ball": Box(-1, 1, shape=(2,)),
+                "ballv": Box(-1, 1, shape=(2,)),
+            },
+            "beta": {
+                "enemy": Box(-1, 1, shape=(1,)),
+                "mine": Box(-1, 1, shape=(1,)),
+                "ball": Box(-1, 1, shape=(2,)),
+                "ballv": Box(-1, 1, shape=(2,)),
+            },
+        }
+
+    def action_space(self):
+        return {
+            "alpha": {"move": Discrete(3)},
+            "beta": {"move": Discrete(3)},
+        }
+
+    def reset(self, key):
+        posk, velk = jax.random.split(key)
+
+        state = PongState(
+            ys=jax.random.uniform(
+                key=posk,
+                shape=(2,),
+                minval=self.paddle_height,
+                maxval=self.height - self.paddle_height,
+            ),
+            ball_velocity=jax.random.uniform(key=velk, shape=(2,)) * 2.0 - 1.0,
+            ball_position=jnp.array(
+                [self.width / 2, self.height / 2], dtype=jnp.float32
+            ),
+        )
+
+        return state, self.get_obs(state)
+
+    def step(self, key, state, action):
+        ys = state.ys + self.paddle_speed * (
+            jnp.array([action["alpha"]["move"], action["beta"]["move"]]) - 1
+        )
+
+        ys = jnp.clip(ys, self.paddle_height, self.height - self.paddle_height)
+        norm = jnp.linalg.norm(state.ball_velocity)
+        v = state.ball_velocity / (norm + 1e-6)
+
+        bp = state.ball_position + v * self.ball_speed
+
+        upper = (
+            jnp.array([self.width, self.height], dtype=jnp.float32) - self.ball_radius
+        )
+        lower = jnp.full_like(upper, self.ball_radius)
+
+        # collsion left:
+        v = v * jnp.where(
+            jnp.logical_and(
+                bp[0] - self.ball_radius < self.xoff + self.paddle_width,
+                jnp.abs(bp[1] - ys[0]) <= self.ball_radius + self.paddle_height,
+            ),
+            -1,
+            1,
+        )
+
+        # collsion right
+        v = v * jnp.where(
+            jnp.logical_and(
+                bp[0] + self.ball_radius > self.width - (self.xoff + self.paddle_width),
+                jnp.abs(bp[1] - ys[1]) <= self.ball_radius + self.paddle_height,
+            ),
+            -1,
+            1,
+        )
+
+        # collsion walls:
+        v = v * jnp.where(upper < bp, -1, 1)
+        v = v * jnp.where(lower > bp, -1, 1)
+
+        # is it done?
+        alpha_score = jnp.where(upper[0] < bp[0], 1, 0)
+        beta_score = jnp.where(lower[0] > bp[0], 1, 0)
+
+        done = jnp.logical_or(alpha_score > 0, beta_score > 0)
+
+        state = PongState(ys=ys, ball_velocity=v, ball_position=bp)
+        timestep = TimeStep(reward=jnp.array(1.0), done=done)
+
+        return state, timestep, self.get_obs(state)
+
+    def get_obs(self, state: PongState):
+        return {
+            "alpha": {
+                "enemy": state.ys[1][:, None],
+                "mine": state.ys[0][:, None],
+                "ball": state.ball_position,
+                "ballv": state.ball_velocity,
+            },
+            "beta": {
+                "enemy": state.ys[0][:, None],
+                "mine": state.ys[1][:, None],
+                "ball": state.ball_position,
+                "ballv": state.ball_velocity,
+            },
+        }
+
+    def render(self, state: PongState):
+        img = Image.new("RGB", (self.width, self.height), color=(33, 77, 33))
+        draw = ImageDraw.Draw(img)
+
+        pos = [
+            [self.width * i + (-1 if i else 1) * self.xoff, y]
+            for i, y in enumerate(state.ys.tolist())
+        ]
+
+        for x, y in pos:
+            draw.rectangle(
+                (
+                    x,
+                    y - self.paddle_height,
+                    x + self.paddle_width,
+                    y + self.paddle_height,
+                ),
+                fill=(255, 255, 255),
+            )
+
+        x, y = state.ball_position.tolist()
+        draw.ellipse(
+            (
+                x - self.ball_radius,
+                y - self.ball_radius,
+                x + self.ball_radius,
+                y + self.ball_radius,
+            ),
+            fill=(255, 255, 255),
+        )
+
+        return img
+
+
 class CartPoleState(NamedTuple):
     x: jnp.ndarray
     x_dot: jnp.ndarray
@@ -378,7 +560,7 @@ class Interpreter(eqx.Module):
         return jax.tree.unflatten(jax.tree.structure(self.treedef), leaves)
 
 
-class GameCritic(Critic):
+class PongCritic(Critic):
     critic: eqx.nn.MLP
 
     def __init__(self, key: Array, in_features: int):
@@ -388,7 +570,7 @@ class GameCritic(Critic):
         return self.critic(obs)
 
 
-class GameActor(Actor):
+class PongActor(Actor):
     actor: eqx.nn.MLP
 
     def __init__(self, key: Array, in_features: int):
@@ -452,10 +634,7 @@ class ActorCritic(eqx.Module):
         return self.critic(obs)
 
 
-class SimplePolicyGradientAgent(eqx.Module):
-    ac: ActorCritic
-
-    opt_state: Tuple[optax.OptState, optax.OptState]
+RLAgent = TypeVar("RLAgent")
 
 
 class RolloutState(NamedTuple, Generic[TState]):
@@ -464,13 +643,90 @@ class RolloutState(NamedTuple, Generic[TState]):
     obs: Observation
 
 
-class SimplePolicyGradientTrainer(eqx.Module, Generic[TState]):
-    optim: optax.GradientTransformation = eqx.field(static=True)
+class RLTrainer(eqx.Module, Generic[TState, RLAgent]):
     env: Environment[TState] = eqx.field(static=True)
 
     env_n: int = eqx.field(static=True, default=8)
     cycle_n: int = eqx.field(static=True, default=64)
     step_n: int = eqx.field(static=True, default=128)
+
+    def make_agent(self, key: Array, *args, **kwargs) -> RLAgent:
+        raise NotImplementedError
+
+    def action_value(self, key: Array, agent: RLAgent, obs):
+        raise NotImplementedError
+
+    def train_step(
+        self, rs: RolloutState[TState], agent: RLAgent
+    ) -> Tuple[RolloutState[TState], RLAgent]:
+        raise NotImplementedError
+
+    def rollout(
+        self, rs: RolloutState[TState], agent: RLAgent
+    ) -> Tuple[RolloutState[TState], Transition]:
+        def step(rs: RolloutState[TState], _):
+            key, state, obs = rs
+            key, actionk, stepk = jax.random.split(key, 3)
+
+            action, value = self.action_value(actionk, agent, obs)
+            state, (reward, done), obsv = self.env.autostep(stepk, state, action)
+
+            return RolloutState(key=key, state=state, obs=obsv), Transition(
+                observation=obs,
+                action=action,
+                value=value,
+                reward=reward,
+                done=done,
+            )
+
+        return jax.lax.scan(step, rs, length=self.step_n)
+
+    def train_cycle(
+        self, rs: RolloutState[TState], agent: RLAgent
+    ) -> Tuple[RolloutState[TState], RLAgent]:
+        params, static = eqx.partition(agent, eqx.is_array)
+
+        def body(pair, _):
+            rs, params = pair
+
+            agent = eqx.combine(params, static)
+            rs, agent = self.train_step(rs, agent)
+            params = eqx.filter(agent, eqx.is_array)
+
+            return (rs, params), None
+
+        (rs, params), _ = jax.lax.scan(body, (rs, params), length=self.cycle_n)
+        agent = eqx.combine(params, static)
+
+        return rs, agent
+
+    def train(
+        self,
+        key: Array,
+        agent: RLAgent,
+        iterations: int = 128,
+    ) -> RLAgent:
+        key, traink = jax.random.split(key)
+
+        state, obs = jax.vmap(self.env.reset)(jax.random.split(traink, self.env_n))
+
+        rs = RolloutState(key=jax.random.split(key, self.env_n), state=state, obs=obs)
+
+        train_cycle = eqx.filter_jit(self.train_cycle)
+        for i in tqdm(range(iterations)):
+            rs, agent = train_cycle(rs, agent)
+
+        return agent
+
+
+class SimplePolicyGradientAgent(eqx.Module):
+    ac: ActorCritic
+
+    opt_state: Tuple[optax.OptState, optax.OptState]
+
+
+class SimplePolicyGradientTrainer(RLTrainer[TState, SimplePolicyGradientAgent]):
+    optim: optax.GradientTransformation = eqx.field(static=True, default=None)
 
     lr: float = eqx.field(static=True, default=1e-3)
 
@@ -501,52 +757,26 @@ class SimplePolicyGradientTrainer(eqx.Module, Generic[TState]):
             ac=ac,
         )
 
-    def rollout(
-        self, rs: RolloutState[TState], ac: ActorCritic
-    ) -> Tuple[RolloutState[TState], Transition]:
-        def step(rs: RolloutState[TState], _):
-            key, state, obs = rs
-            key, actionk, stepk = jax.random.split(key, 3)
-
-            logits = ac.action(obs)
-            actkey = jax.tree.unflatten(
-                jax.tree.structure(logits),
-                jax.random.split(actionk, len(jax.tree.leaves(logits))),
-            )
-
-            action = jax.tree.map(
-                lambda logits, key: Categorical(logits=logits).sample(seed=key),
-                logits,
-                actkey,
-            )
-
-            value = ac.value(obs)
-
-            state, (reward, done), obsv = self.env.autostep(stepk, state, action)
-
-            return RolloutState(key=key, state=state, obs=obsv), Transition(
-                observation=obs,
-                action=action,
-                value=value,
-                reward=reward,
-                done=done,
-            )
-
-        return jax.lax.scan(step, rs, length=self.step_n)
-
-    def collect(
-        self,
-        rs: RolloutState[TState],
-        agent: SimplePolicyGradientAgent,
-    ) -> Tuple[
-        RolloutState[TState], Transition, Float[Array, "step_n"], Float[Array, "step_n"]
-    ]:
-        rs, transition = self.rollout(rs, agent.ac)
-
-        discount = (1.0 - transition.done.astype(jnp.float32)) * self.discount
-        values = jnp.concatenate(
-            [jnp.squeeze(transition.value), agent.ac.value(rs.obs)]
+    def action_value(self, key, agent, obs):
+        logits = agent.ac.action(obs)
+        actkey = jax.tree.unflatten(
+            jax.tree.structure(logits),
+            jax.random.split(key, len(jax.tree.leaves(logits))),
         )
+
+        action = jax.tree.map(
+            lambda logits, key: Categorical(logits=logits).sample(seed=key),
+            logits,
+            actkey,
+        )
+
+        return action, agent.ac.value(obs)
+
+    def compute_advantage_and_returns(
+        self, transition: Transition, bootstrap: Float[Array, "1"]
+    ) -> Tuple[Float[Array, "step_n"], Float[Array, "step_n"]]:
+        discount = (1.0 - transition.done.astype(jnp.float32)) * self.discount
+        values = jnp.concatenate([jnp.squeeze(transition.value), bootstrap])
         deltas = transition.reward + discount * values[1:] - values[:-1]
 
         def compute(prev, pair):
@@ -560,19 +790,14 @@ class SimplePolicyGradientTrainer(eqx.Module, Generic[TState]):
             compute, 0, (deltas, jnp.squeeze(transition.value), discount), reverse=True
         )
 
-        return rs, transition, advantage, returns
+        return advantage, returns
 
     def train_step(
-        self,
-        rs: RolloutState[TState],
-        agent: SimplePolicyGradientAgent,
-    ) -> Tuple[
-        SimplePolicyGradientAgent,
-        RolloutState[TState],
-        Transition,
-    ]:
-        rs, transition, advantage, returns = jax.vmap(self.collect, in_axes=(0, None))(
-            rs, agent
+        self, rs: RolloutState[TState], agent: SimplePolicyGradientAgent
+    ) -> Tuple[RolloutState[TState], SimplePolicyGradientAgent]:
+        rs, transition = jax.vmap(self.rollout, in_axes=(0, None))(rs, agent)
+        advantage, returns = jax.vmap(self.compute_advantage_and_returns)(
+            transition, jax.vmap(agent.ac.value)(rs.obs)
         )
 
         def actor_loss(ac: ActorCritic, obs, action: PyTree, advantage):
@@ -618,58 +843,11 @@ class SimplePolicyGradientTrainer(eqx.Module, Generic[TState]):
         )
         critic = eqx.apply_updates(agent.ac.critic, critic_update)
 
-        return (
-            replace(
-                agent,
-                ac=replace(agent.ac, actor=actor, critic=critic),
-                opt_state=(opt1, opt2),
-            ),
-            rs,
-            transition,
+        return rs, replace(
+            agent,
+            ac=replace(agent.ac, actor=actor, critic=critic),
+            opt_state=(opt1, opt2),
         )
-
-    def train_cycle(
-        self,
-        agent: SimplePolicyGradientAgent,
-        rs: RolloutState[TState],
-    ) -> Tuple[SimplePolicyGradientAgent, RolloutState[TState], Transition]:
-        params, static = eqx.partition(agent, eqx.is_array)
-
-        def body(pair, _):
-            params, rs = pair
-
-            agent = eqx.combine(params, static)
-            agent, rs, r = self.train_step(rs, agent)
-            params = eqx.filter(agent, eqx.is_array)
-
-            return (params, rs), r
-
-        (params, rs), r = jax.lax.scan(body, (params, rs), length=self.cycle_n)
-        agent = eqx.combine(params, static)
-
-        return agent, rs, r
-
-    def train(
-        self,
-        key: Array,
-        agent: SimplePolicyGradientAgent,
-        compute_metric: Callable[[Transition], dict],
-        iterations: int = 128,
-    ) -> SimplePolicyGradientAgent:
-        key, traink = jax.random.split(key)
-
-        state, obs = jax.vmap(self.env.reset)(jax.random.split(traink, self.env_n))
-
-        rs = RolloutState(key=jax.random.split(key, self.env_n), state=state, obs=obs)
-
-        train_cycle = eqx.filter_jit(self.train_cycle)
-
-        for i in (bar := tqdm(range(0, iterations))):
-            agent, rs, transition = train_cycle(agent, rs)
-
-            bar.set_postfix(compute_metric(transition))
-
-        return agent
 
 
 if __name__ == "__main__":
@@ -678,15 +856,9 @@ if __name__ == "__main__":
 
     key, subk = jax.random.split(key)
     trainer = SimplePolicyGradientTrainer(env=env)
-    agent = trainer.make_agent(subk, actor=GameActor, critic=GameCritic)
+    agent = trainer.make_agent(subk, actor=PongActor, critic=PongCritic)
 
-    # print(agent.ac.interpreter.action(jnp.arange(2)))
-    # exit(0)
-
-    def compute_metric(t: Transition):
-        return {"early": t.done.sum()}
-
-    agent = trainer.train(key, agent, iterations=128, compute_metric=compute_metric)
+    agent = trainer.train(key, agent, iterations=16)
 
     frames = []
     key = jax.random.key(67)
