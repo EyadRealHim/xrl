@@ -38,6 +38,24 @@ class RolloutState(NamedTuple, Generic[TState]):
     obs: Observation
 
 
+class UpdatePkg(NamedTuple):
+    bootstap_observations: Observation
+    transition: Transition
+    actor: Actor
+    critic: Critic
+
+    opt_actor: OptState
+    opt_critic: OptState
+
+
+class UpdatedPkg(NamedTuple):
+    actor: Actor
+    critic: Critic
+
+    opt_actor: OptState
+    opt_critic: OptState
+
+
 class RLTrainer(eqx.Module, Generic[TState, RLAgent]):
     env: Environment[TState] = eqx.field(static=True)
     optim: GradientTransformation = eqx.field(static=True)
@@ -49,13 +67,7 @@ class RLTrainer(eqx.Module, Generic[TState, RLAgent]):
     def make_agent(self, key: Array, *args, **kwargs) -> RLAgent:
         raise NotImplementedError
 
-    def gradient(
-        self,
-        obs: Observation,
-        transition: Transition,
-        actor: Actor,
-        critic: Critic,
-    ) -> PyTree:
+    def update(self, pkg: UpdatePkg) -> UpdatedPkg:
         raise NotImplementedError
 
     def train_step(
@@ -63,46 +75,65 @@ class RLTrainer(eqx.Module, Generic[TState, RLAgent]):
     ) -> Tuple[RolloutState[TState], RLAgent]:
         rs, transition = jax.vmap(self.rollout, in_axes=(0, None))(rs, agent)
 
-        if not isinstance(transition, Transition):
-            assert isinstance(agent.actor, ActorContainer)
-            assert isinstance(agent.critic, CriticContainer)
+        multi_agent = not isinstance(transition, Transition)
 
-            gradient = {"actor": {}, "critic": {}}
-            for k in transition.keys():
-                critic = agent.critic.critics[k]
-                actor = agent.actor.actors[k]
-
-                t = transition[k]
-                obs = rs.obs[k]
-
-                grad = self.gradient(obs, t, actor, critic)
-                for i in gradient.keys():
-                    gradient[i][k] = grad[i]
-        else:
+        if not multi_agent:
             assert isinstance(agent.actor, Actor)
             assert isinstance(agent.critic, Critic)
 
-            gradient = self.gradient(rs.obs, transition, agent.actor, agent.critic)
+            transition = {"unknown": transition}
 
-        result = {
-            k: getattr(agent, k).update(gradient[k], agent.opt[k], self.optim)
-            for k in ["actor", "critic"]
-        }
+            critics = {"unknown": agent.critic}
+            actors = {"unknown": agent.actor}
+            bootstrap_observation = {"unknown": rs.obs}
+            opt = {k: {"unknown": v} for k, v in agent.opt.items()}
+        else:
+            assert isinstance(agent.actor, ActorContainer)
+            assert isinstance(agent.critic, CriticContainer)
 
-        ac = jax.tree.map(
-            lambda x: x[0], result, is_leaf=lambda x: isinstance(x, tuple)
-        )
-        opt = jax.tree.map(
-            lambda x: x[1], result, is_leaf=lambda x: isinstance(x, tuple)
-        )
+            critics = agent.critic.critics
+            actors = agent.actor.actors
 
-        if isinstance(agent.actor, ActorContainer):
-            ac = {
-                "actor": ActorContainer(ac["actor"]),
-                "critic": CriticContainer(ac["critic"]),
-            }
+            bootstrap_observation = rs.obs
+            opt = agent.opt
 
-        return rs, replace(agent, **ac, opt=opt)
+        build = {}
+        for name in transition.keys():
+            pkg = self.update(
+                UpdatePkg(
+                    critic=critics[name],
+                    actor=actors[name],
+                    transition=transition[name],
+                    bootstap_observations=bootstrap_observation[name],
+                    opt_critic=opt["critic"][name],
+                    opt_actor=opt["actor"][name],
+                )
+            )
+
+            build[name] = pkg
+
+        if not multi_agent:
+            pkg = build["unknown"]
+
+            return rs, replace(
+                agent,
+                actor=pkg.actor,
+                critic=pkg.critic,
+                opt={
+                    "actor": pkg.opt_actor,
+                    "critic": pkg.opt_critic,
+                },
+            )
+        else:
+            return rs, replace(
+                agent,
+                actor=ActorContainer({k: v.actor for k, v in build.items()}),
+                critic=CriticContainer({k: v.critic for k, v in build.items()}),
+                opt={
+                    "critic": {k: v.opt_critic for k, v in build.items()},
+                    "actor": {k: v.opt_actor for k, v in build.items()},
+                },
+            )
 
     def rollout(
         self, rs: RolloutState[TState], agent: RLAgent

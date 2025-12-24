@@ -1,4 +1,4 @@
-from .algorithm import _RLAgent, RLTrainer, Transition
+from .algorithm import _RLAgent, RLTrainer, Transition, UpdatedPkg
 from ..environment import ParallelEnvironment, TState
 from ..networks import (
     ActorLike,
@@ -56,7 +56,9 @@ class SimplePolicyGradientTrainer(
             },
         )
 
-    def gradient(self, obs, transition, actor, critic):
+    def update(self, pkg):
+        obs, transition, actor, critic, optactor, optcritic = pkg
+
         advantage, returns = jax.vmap(self.compute_advantage_and_returns)(
             transition, jax.vmap(critic)(obs)
         )
@@ -81,12 +83,18 @@ class SimplePolicyGradientTrainer(
 
             return ((values - returns) ** 2).mean()
 
-        actor_grad = actor_loss(
-            actor, transition.observation, transition.action, advantage
-        )
-        critic_grad = critic_loss(critic, transition.observation, returns)
+        grad = actor_loss(actor, transition.observation, transition.action, advantage)
+        actor, optactor = actor.update(grad, optactor, self.optim)
 
-        return {"actor": actor_grad, "critic": critic_grad}
+        grad = critic_loss(critic, transition.observation, returns)
+        critic, optcritic = critic.update(grad, optcritic, self.optim)
+
+        return UpdatedPkg(
+            actor=actor,
+            critic=critic,
+            opt_actor=optactor,
+            opt_critic=optcritic,
+        )
 
     def compute_advantage_and_returns(
         self, transition: Transition, bootstrap: Float[Array, "1"]
