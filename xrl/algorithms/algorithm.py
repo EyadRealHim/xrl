@@ -232,7 +232,7 @@ class RLTrainer(eqx.Module, Generic[TState, RLAgent]):
 
         return agent
 
-    def render_episode(self, key: Array, agent: RLAgent, max_steps: int = 300):
+    def capture(self, key: Array, agent: RLAgent, max_steps: int = 300):
         key, subkey = jax.random.split(key)
         state, obs = self.env.reset(subkey)
 

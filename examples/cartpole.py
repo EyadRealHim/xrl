@@ -1,5 +1,5 @@
 from xrl.envs.cartpole import CartPole
-from xrl.algorithms import SimplePolicyGradientTrainer
+from xrl.algorithms import PPOTrainer
 from xrl.networks import ActorLike, CriticLike
 
 from tqdm import tqdm
@@ -34,10 +34,7 @@ key = jax.random.key(0)
 env = CartPole()
 
 key, subk = jax.random.split(key)
-trainer = SimplePolicyGradientTrainer(
-    env=env,
-    optim=optax.adam(1e-3),
-)
+trainer = PPOTrainer(env=env, optim=optax.adam(1e-3))
 
 agent = trainer.make_agent(subk, CartPoleActor, CartPoleCritic)
 agent = trainer.train(key, agent, iterations=32)
@@ -45,7 +42,7 @@ agent = trainer.train(key, agent, iterations=32)
 frames = [
     frame
     for frame in tqdm(
-        trainer.render_episode(
+        trainer.capture(
             key=jax.random.key(817),
             agent=agent,
             max_steps=300,

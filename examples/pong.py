@@ -45,7 +45,7 @@ agent = trainer.train(key, agent, iterations=32)
 frames = [
     frame
     for frame in tqdm(
-        trainer.render_episode(
+        trainer.capture(
             key=jax.random.key(817),
             agent=agent,
             max_steps=300,

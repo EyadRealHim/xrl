@@ -23,7 +23,7 @@ class CriticLike(eqx.Module):
     def __init__(self, key: Array, in_features: int):
         pass
 
-    def __call__(self, obs: Observation) -> Float[Array, "1"]:
+    def __call__(self, obs: Observation) -> Float[Array, "n"]:
         raise NotImplementedError
 
 
@@ -138,12 +138,27 @@ class Actor(eqx.Module):
 class Critic(eqx.Module):
     observation: ObservationInterpreter = eqx.field(static=True)
     critic: CriticLike
+    head: eqx.nn.Linear
 
     def __init__(
         self, key: Array, mcritic: Type[CriticLike], observation_space: PyTree[Space]
     ):
         self.observation = ObservationInterpreter(observation_space)
         self.critic = mcritic(key=key, in_features=self.observation.out_features)
+
+        output = jax.eval_shape(
+            self.critic,
+            jax.ShapeDtypeStruct((self.observation.out_features,), jnp.float32),
+        )
+
+        head = eqx.nn.Linear(output.size, 1, key=key)
+
+        head = eqx.tree_at(
+            lambda layer: layer.weight, head, jnp.zeros_like(head.weight)
+        )
+        self.head = eqx.tree_at(
+            lambda layer: layer.bias, head, jnp.zeros_like(head.bias)
+        )
 
     def opt_state(self, optim: GradientTransformation):
         return optim.init(eqx.filter(self, eqx.is_inexact_array))
@@ -156,7 +171,7 @@ class Critic(eqx.Module):
     def __call__(self, obs: Float[Array, "..."]):
         obs = self.observation.interpret(obs)
 
-        return self.critic(obs)
+        return self.head(self.critic(obs))
 
 
 class ActorContainer(eqx.Module):

@@ -88,23 +88,28 @@ class Pong(ParallelEnvironment[PongState]):
         lower = jnp.full_like(upper, self.ball_radius)
 
         # collsion left:
-        v = v * jnp.where(
-            jnp.logical_and(
-                bp[0] - self.ball_radius < self.xoff + self.paddle_width,
-                jnp.abs(bp[1] - ys[0]) <= self.ball_radius + self.paddle_height,
-            ),
-            -1,
-            1,
+        v = v.at[0].multiply(
+            jnp.where(
+                jnp.logical_and(
+                    bp[0] - self.ball_radius < self.xoff + self.paddle_width,
+                    jnp.abs(bp[1] - ys[0]) <= self.ball_radius + self.paddle_height,
+                ),
+                -1,
+                1,
+            )
         )
 
         # collsion right
-        v = v * jnp.where(
-            jnp.logical_and(
-                bp[0] + self.ball_radius > self.width - (self.xoff + self.paddle_width),
-                jnp.abs(bp[1] - ys[1]) <= self.ball_radius + self.paddle_height,
-            ),
-            -1,
-            1,
+        v = v.at[0].multiply(
+            jnp.where(
+                jnp.logical_and(
+                    bp[0] + self.ball_radius
+                    > self.width - (self.xoff + self.paddle_width),
+                    jnp.abs(bp[1] - ys[1]) <= self.ball_radius + self.paddle_height,
+                ),
+                -1,
+                1,
+            )
         )
 
         # collsion walls:
