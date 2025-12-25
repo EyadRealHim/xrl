@@ -1,7 +1,7 @@
-from ..environment import Environment, TState, Observation, Action
+from ..environment import Environment, ParallelEnvironment, TState, Observation, Action
 from ..networks import Actor, Critic, ActorContainer, CriticContainer
 
-from typing import TypeVar, Union, Generic, NamedTuple, Tuple, Mapping
+from typing import TypeVar, Union, Generic, NamedTuple, Tuple, Mapping, Any
 from jaxtyping import PyTree, Array, Float, Bool
 from optax import OptState, GradientTransformation
 
@@ -9,6 +9,7 @@ from dataclasses import replace
 from distrax import Categorical
 from tqdm import tqdm
 
+import jax.numpy as jnp
 import equinox as eqx
 
 import jax
@@ -231,6 +232,51 @@ class RLTrainer(eqx.Module, Generic[TState, RLAgent]):
             rs, agent = train_cycle(rs, agent)
 
         return agent
+
+    def evaluate(self, key: Array, agent: RLAgent, max_steps: int = 1000):
+        def step(carry):
+            logits = agent.actor(carry["obs"])
+
+            key, actionk = jax.random.split(carry["key"])
+            keys = jax.random.split(actionk, len(logits.keys()))
+            keys = jax.tree.unflatten(jax.tree.structure(logits), keys)
+
+            action = jax.tree.map(
+                lambda logits, key: Categorical(logits=logits).sample(seed=key),
+                logits,
+                keys,
+            )
+
+            key, stepk = jax.random.split(key)
+            state, (reward, done), obs = self.env.step(stepk, carry["state"], action)
+
+            return {
+                "key": key,
+                "state": state,
+                "obs": obs,
+                "done": done,
+                "reward": jax.tree.map(lambda x, y: x + y, carry["reward"], reward),
+            }
+
+        key, subkey = jax.random.split(key)
+        state, obs = self.env.reset(subkey)
+        reward = (
+            {k: 0 for k in obs.keys()}
+            if isinstance(self.env, ParallelEnvironment)
+            else 0
+        )
+
+        return jax.lax.while_loop(
+            lambda x: jnp.logical_not(x["done"]),
+            step,
+            {
+                "key": key,
+                "state": state,
+                "obs": obs,
+                "done": False,
+                "reward": reward,
+            },
+        )["reward"]
 
     def capture(self, key: Array, agent: RLAgent, max_steps: int = 300):
         key, subkey = jax.random.split(key)
