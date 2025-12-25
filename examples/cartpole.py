@@ -40,8 +40,8 @@ agent = trainer.make_agent(subk, CartPoleActor, CartPoleCritic)
 agent = trainer.train(key, agent, iterations=32)
 
 frames = [
-    frame
-    for frame in tqdm(
+    env.render(state)
+    for state in tqdm(
         trainer.capture(
             key=jax.random.key(817),
             agent=agent,

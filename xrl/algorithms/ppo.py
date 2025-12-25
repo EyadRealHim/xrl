@@ -89,6 +89,7 @@ class PPOTrainer(RLTrainer[TState, PPOAgent], Generic[TState]):
             log_p, entropy = act(actor, obs, action)
 
             ratio = jnp.exp(log_p - init_log_p)
+            advantage = jnp.expand_dims(advantage, axis=-1)
 
             return (
                 -jnp.minimum(

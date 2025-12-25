@@ -282,15 +282,9 @@ class RLTrainer(eqx.Module, Generic[TState, RLAgent]):
         key, subkey = jax.random.split(key)
         state, obs = self.env.reset(subkey)
 
-        try:
-            yield self.env.render(state)
-        except NotImplementedError:
-            print(
-                f"[WARNING]: enviornment '{self.env.__name__}' does not implement .render"
-            )
-            return
+        yield state
 
-        for _ in range(max_steps):
+        for _ in range(max_steps - 1):
             logits = agent.actor(obs)
 
             key, actionk = jax.random.split(key)
@@ -306,7 +300,7 @@ class RLTrainer(eqx.Module, Generic[TState, RLAgent]):
             key, stepk = jax.random.split(key)
             state, (reward, done), obs = self.env.step(stepk, state, action)
 
-            yield self.env.render(state)
+            yield state
 
             if done.item():
                 break
