@@ -1,16 +1,8 @@
-from .algorithm import _RLAgent, RLTrainer, Transition, UpdatedPkg
-from ..environment import ParallelEnvironment, TState
-from ..networks import (
-    ActorLike,
-    CriticLike,
-    Actor,
-    Critic,
-    ActorContainer,
-    CriticContainer,
-)
+from .algorithm import RLTrainer, UpdatePkg, Transition
+from ..environment import TState
 
-from typing import Generic, Type, Tuple
-from jaxtyping import PyTree, Array, Float
+from typing import Generic, Tuple
+from jaxtyping import Array, Float
 
 from distrax import Categorical
 
@@ -20,11 +12,7 @@ import equinox as eqx
 import jax
 
 
-class PPOAgent(_RLAgent):
-    pass
-
-
-class PPOTrainer(RLTrainer[TState, PPOAgent], Generic[TState]):
+class PPOTrainer(RLTrainer[TState], Generic[TState]):
     discount: float = eqx.field(static=True, default=0.96)
     lambda_: float = eqx.field(static=True, default=0.95)
 
@@ -32,40 +20,12 @@ class PPOTrainer(RLTrainer[TState, PPOAgent], Generic[TState]):
     clip_coef: float = 0.2
     entropy_coef: float = 0.01
 
-    def make_agent(
-        self, key: Array, mactor: Type[ActorLike], mcritic: Type[CriticLike]
-    ) -> PPOAgent:
-        ActorConstuct = Actor
-        CriticConstruct = Critic
-
-        if isinstance(self.env, ParallelEnvironment):
-            ActorConstuct = ActorContainer.create
-            CriticConstruct = CriticContainer.create
-
-        a, b = jax.random.split(key)
-
-        actor = ActorConstuct(
-            a, mactor, self.env.observation_space(), self.env.action_space()
-        )
-        critic = CriticConstruct(b, mcritic, self.env.observation_space())
-
-        return PPOAgent(
-            actor=actor,
-            critic=critic,
-            opt={
-                "actor": actor.opt_state(self.optim),
-                "critic": critic.opt_state(self.optim),
-            },
-        )
-
-    def update(self, pkg):
-        obs, transition, actor, critic, optactor, optcritic = pkg
-
+    def update(self, actor, critic, optactor, optcritic, transition, bootstraps):
         advantage, returns = jax.vmap(self.compute_advantage_and_returns)(
-            transition, jax.vmap(critic)(obs)
+            transition, jax.vmap(critic)(bootstraps)
         )
 
-        def act(actor: Actor, obs, action):
+        def act(actor, obs, action):
             logits = jax.vmap(jax.vmap(actor))(obs)
 
             def fun(logits, action):
@@ -78,18 +38,17 @@ class PPOTrainer(RLTrainer[TState, PPOAgent], Generic[TState]):
 
             return acttree[0], acttree[1]
 
-        def values(critic: Critic, obs):
+        def values(critic, obs):
             return jnp.squeeze(jax.vmap(jax.vmap(critic))(obs))
 
         init_log_p, _ = act(actor, transition.observation, transition.action)
         init_value = values(critic, transition.observation)
 
         @eqx.filter_grad
-        def actor_loss(actor: Actor, obs, action: PyTree, advantage):
+        def actor_loss(actor, obs, action, advantage):
             log_p, entropy = act(actor, obs, action)
 
             ratio = jnp.exp(log_p - init_log_p)
-            advantage = jnp.expand_dims(advantage, axis=-1)
 
             return (
                 -jnp.minimum(
@@ -100,7 +59,7 @@ class PPOTrainer(RLTrainer[TState, PPOAgent], Generic[TState]):
             )
 
         @eqx.filter_grad
-        def critic_loss(critic: Critic, obs, returns):
+        def critic_loss(critic, obs, returns):
             value = values(critic, obs)
 
             loss1 = (value - returns) ** 2
@@ -136,11 +95,11 @@ class PPOTrainer(RLTrainer[TState, PPOAgent], Generic[TState]):
         )
         actor, critic = eqx.combine(params, static)
 
-        return UpdatedPkg(
+        return UpdatePkg(
             actor=actor,
             critic=critic,
-            opt_actor=optactor,
-            opt_critic=optcritic,
+            optactor=optactor,
+            optcritic=optcritic,
         )
 
     def compute_advantage_and_returns(

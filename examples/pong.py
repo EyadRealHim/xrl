@@ -1,5 +1,5 @@
 from xrl.envs.pong import Pong
-from xrl.algorithms import SimplePolicyGradientTrainer
+from xrl.algorithms import PPOTrainer
 from xrl.networks import ActorLike, CriticLike
 
 from tqdm import tqdm
@@ -34,10 +34,7 @@ key = jax.random.key(0)
 env = Pong()
 
 key, subk = jax.random.split(key)
-trainer = SimplePolicyGradientTrainer(
-    env=env,
-    optim=optax.adam(1e-3),
-)
+trainer = PPOTrainer(env=env, optim=optax.adam(1e-3), env_n=4)
 
 agent = trainer.make_agent(subk, PongActor, PongCritic)
 agent = trainer.train(key, agent, iterations=32)

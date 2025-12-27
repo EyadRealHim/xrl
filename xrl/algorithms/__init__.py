@@ -1,10 +1,7 @@
-from .spg import SimplePolicyGradientTrainer, SimplePolicyGradientAgent
-from .ppo import PPOTrainer, PPOAgent
-
+from .spg import SimplePolicyGradientTrainer
+from .ppo import PPOTrainer
 
 __all__ = [
     "SimplePolicyGradientTrainer",
-    "SimplePolicyGradientAgent",
     "PPOTrainer",
-    "PPOAgent",
 ]

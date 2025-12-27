@@ -1,4 +1,4 @@
-from ..environment import ParallelEnvironment, Box, Discrete, TimeStep
+from ..environment import GroupEnv, Box, Discrete, TimeStep
 
 from typing import NamedTuple
 from jaxtyping import Array, Float
@@ -16,7 +16,7 @@ class PongState(NamedTuple):
     ball_position: Float[Array, "2"]
 
 
-class Pong(ParallelEnvironment[PongState]):
+class Pong(GroupEnv[PongState]):
     width: int = 800
     height: int = 600
 
@@ -131,10 +131,10 @@ class Pong(ParallelEnvironment[PongState]):
             return 1 - jnp.abs(bp[1] - y) / self.height
 
         state = PongState(ys=ys, ball_velocity=v, ball_position=bp)
-        timestep = TimeStep(
-            reward={"alpha": reward(ys[0]), "beta": reward(ys[1])},
-            done=done,
-        )
+        timestep = {
+            "alpha": TimeStep(reward=reward(ys[0]), done=done),
+            "beta": TimeStep(reward=reward(ys[1]), done=done),
+        }
 
         return state, timestep, self.get_obs(state)
 

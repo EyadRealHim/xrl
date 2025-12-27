@@ -34,7 +34,7 @@ key = jax.random.key(0)
 env = CartPole()
 
 key, subk = jax.random.split(key)
-trainer = PPOTrainer(env=env, optim=optax.adam(1e-3))
+trainer = PPOTrainer(env=env, optim=optax.adam(1e-3), env_n=4)
 
 agent = trainer.make_agent(subk, CartPoleActor, CartPoleCritic)
 agent = trainer.train(key, agent, iterations=32)

@@ -5,12 +5,12 @@ from typing import (
     Tuple,
     Mapping,
     Generic,
-    Union,
     NamedTuple,
 )
 
-from jaxtyping import PyTree, Array, Float, Int, Bool, DTypeLike
+from jaxtyping import Array, Float, Int, Bool, DTypeLike
 
+from .xrl_tree import prefix, of_instance
 from PIL import Image
 
 import jax.numpy as jnp
@@ -18,8 +18,12 @@ import equinox as eqx
 
 import jax
 
-Observation: TypeAlias = PyTree[Float[Array, "..."]]  # TypeVar("Observation")
-Action: TypeAlias = PyTree[Int[Array, "..."]]
+
+T = TypeVar("T")
+Map: TypeAlias = Mapping[str, T]
+
+Observation: TypeAlias = Map[Float[Array, "..."]]
+Action: TypeAlias = Map[Int[Array, "n"]]
 
 
 class Space:
@@ -61,25 +65,42 @@ TState = TypeVar("TState")
 
 
 class TimeStep(NamedTuple):
-    reward: Union[PyTree[Float[Array, "..."]], Float[Array, "..."]]
-    done: Bool[Array, "..."]
+    reward: Float[Array, "1"]
+    done: Bool[Array, "1"]
 
 
-class Environment(eqx.Module, Generic[TState]):
+class SoloEnv(eqx.Module, Generic[TState]):
+    """
+    an envitonment for a single-agent
+    """
+
     def autostep(
         self, key: Array, state: TState, action: Action
     ) -> Tuple[TState, TimeStep, Observation]:
         key, stepk = jax.random.split(key)
-        state, step, obs = self.step(stepk, state, action)
+        state, time, obs = self.step(stepk, state, action)
+
+        assert time.done.shape == (), (
+            f"TimeStep.done must be a scalar (shape=()), but got shape={time.done.shape}"
+        )
+        assert time.done.dtype == jnp.bool_, (
+            f"TimeStep.done must be boolean, but got dtype={time.done.dtype}"
+        )
+        assert time.reward.shape == (), (
+            f"TimeStep.reward must be a scalar (shape=()), but got shape={time.reward.shape}"
+        )
+        assert time.reward.dtype == jnp.float32, (
+            f"TimeStep.reward must be float32, but got dtype={time.reward.dtype}"
+        )
 
         state, obs = jax.lax.cond(
-            step.done,
+            time.done,
             self.reset,
             lambda _: (state, obs),
             key,
         )
 
-        return state, step, obs
+        return state, time, obs
 
     def reset(self, key: Array) -> Tuple[TState, Observation]:
         raise NotImplementedError
@@ -89,32 +110,68 @@ class Environment(eqx.Module, Generic[TState]):
     ) -> Tuple[TState, TimeStep, Observation]:
         raise NotImplementedError
 
-    def observation_space(self) -> PyTree[Space]:
+    def observation_space(self) -> Map[Space]:
         raise NotImplementedError
 
-    def action_space(self) -> PyTree[Space]:
+    def action_space(self) -> Map[Space]:
         raise NotImplementedError
 
     def render(self, state: TState) -> Image.Image:
         raise NotImplementedError
 
 
-class ParallelEnvironment(Environment[TState]):
+class GroupEnv(eqx.Module, Generic[TState]):
     def autostep(
-        self, key: Array, state: TState, action: Mapping[str, Action]
-    ) -> Tuple[TState, TimeStep, Mapping[str, Observation]]:
-        return super().autostep(key=key, state=state, action=action)
+        self, key: Array, state: TState, action: Map[Action]
+    ) -> Tuple[TState, Map[TimeStep], Map[Observation]]:
+        key, stepk = jax.random.split(key)
+        state, time, obs = self.step(stepk, state, action)
 
-    def reset(self, key: Array) -> Tuple[TState, Mapping[str, Observation]]:
+        assert prefix(action) == prefix(time), (
+            f"Agent mismatch: The TimeStep dict keys do not match the Action dict keys.\n"
+            f"Expected keys: {list(action.keys())}\n"
+            f"Received keys: {list(time.keys())}"
+        )
+
+        def check(path, time):
+            key = path[-1].key
+
+            if time.reward.shape != ():
+                yield f"Agent {key}: reward.shape must be (), got {time.reward.shape}"
+            if time.reward.dtype != jnp.float32:
+                yield f"Agent {key}: reward.dtype must be float32, got {time.reward.dtype}"
+
+            if time.done.shape != ():
+                yield f"Agent {key}: done.shape must be (), got {time.done.shape}"
+            if time.done.dtype != jnp.bool_:
+                yield f"Agent {key}: done.dtype must be bool, got {time.done.dtype}"
+
+        errors_g = jax.tree.map_with_path(check, time, is_leaf=of_instance(TimeStep))
+        errors = [e for errs in jax.tree.leaves(errors_g) for e in errs]
+
+        assert not errors, "\n".join(errors)
+
+        done = jax.tree.reduce(
+            lambda a, b: jnp.logical_or(a, b.done),
+            time,
+            False,
+            is_leaf=lambda x: isinstance(x, TimeStep),
+        )
+
+        state, obs = jax.lax.cond(done, self.reset, lambda _: (state, obs), key)
+
+        return state, time, obs
+
+    def reset(self, key: Array) -> Tuple[TState, Map[Observation]]:
         raise NotImplementedError
 
     def step(
-        self, key: Array, state: TState, action: Mapping[str, Action]
-    ) -> Tuple[TState, TimeStep, Mapping[str, Observation]]:
+        self, key: Array, state: TState, action: Map[Action]
+    ) -> Tuple[TState, Map[TimeStep], Map[Observation]]:
         raise NotImplementedError
 
-    def observation_space(self) -> Mapping[str, PyTree[Space]]:
+    def observation_space(self) -> Map[Map[Space]]:
         raise NotImplementedError
 
-    def action_space(self) -> Mapping[str, PyTree[Space]]:
+    def action_space(self) -> Map[Map[Space]]:
         raise NotImplementedError

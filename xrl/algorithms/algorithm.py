@@ -1,11 +1,11 @@
-from ..environment import Environment, ParallelEnvironment, TState, Observation, Action
-from ..networks import Actor, Critic, ActorContainer, CriticContainer
+from ..environment import SoloEnv, GroupEnv, TState, Observation, Action, Map, TimeStep
+from ..networks import Actor, ActorLike, Critic, CriticLike
 
-from typing import TypeVar, Union, Generic, NamedTuple, Tuple, Mapping, Any
+from typing import Union, Generic, NamedTuple, Tuple, Type
 from jaxtyping import PyTree, Array, Float, Bool
 from optax import OptState, GradientTransformation
 
-from dataclasses import replace
+from ..xrl_tree import of_instance, keys_like
 from distrax import Categorical
 from tqdm import tqdm
 
@@ -17,200 +17,119 @@ import jax
 
 class Transition(NamedTuple):
     observation: Observation
-    reward: Float[Array, "..."]
+    reward: Float[Array, "1"]
     action: Action
-    value: Float[Array, "..."]
-    done: Bool[Array, "..."]
-
-
-class _RLAgent(eqx.Module):
-    actor: Union[Actor, ActorContainer]
-    critic: Union[Critic, CriticContainer]
-
-    opt: PyTree[OptState]
-
-
-RLAgent = TypeVar("RLAgent", bound=_RLAgent)
+    value: Float[Array, "1"]
+    done: Bool[Array, "1"]
 
 
 class RolloutState(NamedTuple, Generic[TState]):
     key: Array
     state: TState
-    obs: Observation
+    obs: Union[Map[Observation], Observation]
+
+
+class RLAgent(eqx.Module):
+    actor: PyTree[Actor]
+    critic: PyTree[Critic]
+
+    optactor: PyTree[OptState]
+    optcritic: PyTree[OptState]
 
 
 class UpdatePkg(NamedTuple):
-    bootstap_observations: Observation
-    transition: Transition
     actor: Actor
     critic: Critic
 
-    opt_actor: OptState
-    opt_critic: OptState
+    optactor: OptState
+    optcritic: OptState
 
 
-class UpdatedPkg(NamedTuple):
-    actor: Actor
-    critic: Critic
-
-    opt_actor: OptState
-    opt_critic: OptState
-
-
-class RLTrainer(eqx.Module, Generic[TState, RLAgent]):
-    env: Environment[TState] = eqx.field(static=True)
+class RLTrainer(eqx.Module, Generic[TState]):
+    env: Union[SoloEnv[TState], GroupEnv[TState]] = eqx.field(static=True)
     optim: GradientTransformation = eqx.field(static=True)
 
     env_n: int = eqx.field(static=True, default=8)
     cycle_n: int = eqx.field(static=True, default=64)
     step_n: int = eqx.field(static=True, default=128)
 
-    def make_agent(self, key: Array, *args, **kwargs) -> RLAgent:
+    def update(
+        self,
+        actor: Actor,
+        critic: Critic,
+        optactor: OptState,
+        optcritic: OptState,
+        transition: Transition,
+        bootstraps: Observation,
+    ) -> UpdatePkg:
         raise NotImplementedError
 
-    def update(self, pkg: UpdatePkg) -> UpdatedPkg:
-        raise NotImplementedError
+    def make_agent(
+        self, key: Array, actor: Type[ActorLike], critic: Type[CriticLike]
+    ) -> RLAgent:
+        observation = self.env.observation_space()
+        action = self.env.action_space()
+
+        is_multi_agent = isinstance(self.env, GroupEnv)
+
+        def is_leaf(x):
+            return not is_multi_agent or id(x) != id(observation)
+
+        actork, critick = jax.random.split(key)
+        actors = jax.tree.map(
+            lambda obs, action, key: Actor(key, actor, obs, action),
+            observation,
+            action,
+            keys_like(actork, jax.tree.structure(observation, is_leaf=is_leaf)),
+            is_leaf=is_leaf,
+        )
+        critics = jax.tree.map(
+            lambda obs, key: Critic(key, critic, obs),
+            observation,
+            keys_like(critick, jax.tree.structure(observation, is_leaf=is_leaf)),
+            is_leaf=is_leaf,
+        )
+
+        return RLAgent(
+            actor=actors,
+            critic=critics,
+            optactor=jax.tree.map(
+                lambda actor: actor.opt_state(self.optim),
+                actors,
+                is_leaf=of_instance(Actor),
+            ),
+            optcritic=jax.tree.map(
+                lambda critic: critic.opt_state(self.optim),
+                critics,
+                is_leaf=of_instance(Critic),
+            ),
+        )
 
     def train_step(
         self, rs: RolloutState[TState], agent: RLAgent
     ) -> Tuple[RolloutState[TState], RLAgent]:
         rs, transition = jax.vmap(self.rollout, in_axes=(0, None))(rs, agent)
 
-        multi_agent = not isinstance(transition, Transition)
+        pkgs = jax.tree.map(
+            self.update,
+            agent.actor,
+            agent.critic,
+            agent.optactor,
+            agent.optcritic,
+            transition,
+            rs.obs,
+            is_leaf=of_instance(Actor),
+        )
 
-        if not multi_agent:
-            assert isinstance(agent.actor, Actor)
-            assert isinstance(agent.critic, Critic)
+        def isleaf(x):
+            return isinstance(x, UpdatePkg)
 
-            transition = {"unknown": transition}
-
-            critics = {"unknown": agent.critic}
-            actors = {"unknown": agent.actor}
-            bootstrap_observation = {"unknown": rs.obs}
-            opt = {k: {"unknown": v} for k, v in agent.opt.items()}
-        else:
-            assert isinstance(agent.actor, ActorContainer)
-            assert isinstance(agent.critic, CriticContainer)
-
-            critics = agent.critic.critics
-            actors = agent.actor.actors
-
-            bootstrap_observation = rs.obs
-            opt = agent.opt
-
-        build = {}
-        for name in transition.keys():
-            pkg = self.update(
-                UpdatePkg(
-                    critic=critics[name],
-                    actor=actors[name],
-                    transition=transition[name],
-                    bootstap_observations=bootstrap_observation[name],
-                    opt_critic=opt["critic"][name],
-                    opt_actor=opt["actor"][name],
-                )
-            )
-
-            build[name] = pkg
-
-        if not multi_agent:
-            pkg = build["unknown"]
-
-            return rs, replace(
-                agent,
-                actor=pkg.actor,
-                critic=pkg.critic,
-                opt={
-                    "actor": pkg.opt_actor,
-                    "critic": pkg.opt_critic,
-                },
-            )
-        else:
-            return rs, replace(
-                agent,
-                actor=ActorContainer({k: v.actor for k, v in build.items()}),
-                critic=CriticContainer({k: v.critic for k, v in build.items()}),
-                opt={
-                    "critic": {k: v.opt_critic for k, v in build.items()},
-                    "actor": {k: v.opt_actor for k, v in build.items()},
-                },
-            )
-
-    def rollout(
-        self, rs: RolloutState[TState], agent: RLAgent
-    ) -> Tuple[RolloutState[TState], Union[Mapping[str, Transition], Transition]]:
-        def step(rs: RolloutState[TState], _):
-            key, state, obs = rs
-            key, actionk, stepk = jax.random.split(key, 3)
-
-            logits = agent.actor(obs)
-            value = agent.critic(obs)
-
-            actkey = jax.tree.unflatten(
-                jax.tree.structure(logits),
-                jax.random.split(actionk, len(jax.tree.leaves(logits))),
-            )
-
-            action = jax.tree.map(
-                lambda logits, key: Categorical(logits=logits).sample(seed=key),
-                logits,
-                actkey,
-            )
-
-            state, (reward, done), obsv = self.env.autostep(stepk, state, action)
-
-            return RolloutState(key=key, state=state, obs=obsv), (
-                obs,
-                action,
-                value,
-                reward,
-                done,
-            )
-
-        rs, data = jax.lax.scan(step, rs, length=self.step_n)
-
-        reward = data[3]
-        keys = reward.keys() if isinstance(reward, dict) else None
-
-        if keys is None:
-            assert not isinstance(data[2], dict), "Unreachable"
-            return rs, Transition(
-                observation=data[0],
-                action=data[1],
-                value=data[2],
-                reward=data[3],
-                done=data[4],
-            )
-
-        return rs, {
-            k: Transition(
-                observation=data[0][k],
-                action=data[1][k],
-                value=data[2][k],
-                reward=data[3][k],
-                done=data[4],
-            )
-            for k in keys
-        }
-
-    def train_cycle(
-        self, rs: RolloutState[TState], agent: RLAgent
-    ) -> Tuple[RolloutState[TState], RLAgent]:
-        params, static = eqx.partition(agent, eqx.is_array)
-
-        def body(pair, _):
-            rs, params = pair
-
-            agent = eqx.combine(params, static)
-            rs, agent = self.train_step(rs, agent)
-            params = eqx.filter(agent, eqx.is_array)
-
-            return (rs, params), None
-
-        (rs, params), _ = jax.lax.scan(body, (rs, params), length=self.cycle_n)
-        agent = eqx.combine(params, static)
-
-        return rs, agent
+        return rs, RLAgent(
+            actor=jax.tree.map(lambda x: x.actor, pkgs, is_leaf=isleaf),
+            critic=jax.tree.map(lambda x: x.critic, pkgs, is_leaf=isleaf),
+            optactor=jax.tree.map(lambda x: x.optactor, pkgs, is_leaf=isleaf),
+            optcritic=jax.tree.map(lambda x: x.optcritic, pkgs, is_leaf=isleaf),
+        )
 
     def train(
         self,
@@ -228,79 +147,122 @@ class RLTrainer(eqx.Module, Generic[TState, RLAgent]):
         train_cycle = eqx.filter_jit(self.train_cycle)
         _ = jax.block_until_ready(train_cycle(rs, agent))
 
-        for i in tqdm(range(iterations)):
+        for _ in tqdm(range(iterations)):
             rs, agent = train_cycle(rs, agent)
 
         return agent
 
-    def evaluate(self, key: Array, agent: RLAgent, max_steps: int = 1000):
-        def step(carry):
-            logits = agent.actor(carry["obs"])
+    def train_cycle(
+        self, rs: RolloutState[TState], agent: RLAgent
+    ) -> Tuple[RolloutState[TState], RLAgent]:
+        params, static = eqx.partition(agent, eqx.is_array)
 
-            key, actionk = jax.random.split(carry["key"])
-            keys = jax.random.split(actionk, len(logits.keys()))
-            keys = jax.tree.unflatten(jax.tree.structure(logits), keys)
+        def body(_, pair):
+            rs, params = pair
 
-            action = jax.tree.map(
-                lambda logits, key: Categorical(logits=logits).sample(seed=key),
-                logits,
-                keys,
+            agent = eqx.combine(params, static)
+            rs, agent = self.train_step(rs, agent)
+            params = eqx.filter(agent, eqx.is_array)
+
+            return rs, params
+
+        rs, params = jax.lax.fori_loop(0, self.cycle_n, body, (rs, params))
+        agent = eqx.combine(params, static)
+
+        return rs, agent
+
+    def rollout(
+        self, rs: RolloutState[TState], agent: RLAgent
+    ) -> Tuple[RolloutState[TState], Union[Map[Transition], Transition]]:
+        def step(rs: RolloutState[TState], _):
+            key, state, obs = rs
+
+            logits = jax.tree.map(
+                lambda actor, obsv: actor(obsv),
+                agent.actor,
+                obs,
+                is_leaf=of_instance(Actor),
+            )
+            value = jax.tree.map(
+                lambda critic, obsv: critic(obsv),
+                agent.critic,
+                obs,
+                is_leaf=of_instance(Critic),
             )
 
-            key, stepk = jax.random.split(key)
-            state, (reward, done), obs = self.env.step(stepk, carry["state"], action)
+            key, action_key = jax.random.split(key)
+            action = jax.tree.map(
+                lambda key, logits: Categorical(logits=logits).sample(seed=key),
+                keys_like(key, jax.tree.structure(logits)),
+                logits,
+            )
 
-            return {
-                "key": key,
-                "state": state,
-                "obs": obs,
-                "done": done,
-                "reward": jax.tree.map(lambda x, y: x + y, carry["reward"], reward),
-            }
+            key, step_key = jax.random.split(key)
+            state, time, obsv = self.env.autostep(step_key, state, action)
 
-        key, subkey = jax.random.split(key)
-        state, obs = self.env.reset(subkey)
-        reward = (
-            {k: 0 for k in obs.keys()}
-            if isinstance(self.env, ParallelEnvironment)
-            else 0
-        )
+            assert jax.tree.structure(obsv) == jax.tree.structure(obs), (
+                "Observations differ"
+            )
 
-        return jax.lax.while_loop(
-            lambda x: jnp.logical_not(x["done"]),
-            step,
-            {
-                "key": key,
-                "state": state,
-                "obs": obs,
-                "done": False,
-                "reward": reward,
-            },
-        )["reward"]
+            transition = jax.tree.map(
+                lambda time, value, action, obs: Transition(
+                    observation=obs,
+                    action=action,
+                    value=value,
+                    reward=time.reward,
+                    done=time.done,
+                ),
+                time,
+                value,
+                action,
+                obs,
+                is_leaf=lambda x: isinstance(x, TimeStep),
+            )
 
-    def capture(self, key: Array, agent: RLAgent, max_steps: int = 300):
+            return RolloutState(key=key, state=state, obs=obsv), transition
+
+        return jax.lax.scan(step, rs, length=self.step_n)
+
+    def capture(
+        self, key: Array, agent: RLAgent, max_steps=999, deterministic: bool = False
+    ):
         key, subkey = jax.random.split(key)
         state, obs = self.env.reset(subkey)
 
         yield state
 
         for _ in range(max_steps - 1):
-            logits = agent.actor(obs)
-
             key, actionk = jax.random.split(key)
-            keys = jax.random.split(actionk, len(logits.keys()))
-            keys = jax.tree.unflatten(jax.tree.structure(logits), keys)
 
-            action = jax.tree.map(
-                lambda logits, key: Categorical(logits=logits).sample(seed=key),
-                logits,
-                keys,
+            logits = jax.tree.map(
+                lambda actor, obsv: actor(obsv),
+                agent.actor,
+                obs,
+                is_leaf=of_instance(Actor),
             )
+            if not deterministic:
+                action = jax.tree.map(
+                    lambda key, logits: Categorical(logits=logits).sample(seed=key),
+                    keys_like(key, jax.tree.structure(logits)),
+                    logits,
+                )
+            else:
+                action = jax.tree.map(
+                    lambda logits: jnp.argmax(logits, axis=-1),
+                    logits,
+                )
 
             key, stepk = jax.random.split(key)
-            state, (reward, done), obs = self.env.step(stepk, state, action)
+            state, time, obs = self.env.step(stepk, state, action)
 
             yield state
 
-            if done.item():
+            done = jax.tree.reduce(
+                lambda a, b: jnp.logical_or(a, b.done),
+                time,
+                False,
+                is_leaf=lambda x: isinstance(x, TimeStep),
+            )
+
+            if done:
                 break

@@ -1,4 +1,4 @@
-from ..environment import Environment, Observation, Box, Discrete, TimeStep
+from ..environment import SoloEnv, Observation, Box, Discrete, TimeStep
 
 from typing import NamedTuple
 from jaxtyping import Array
@@ -18,7 +18,7 @@ class CartPoleState(NamedTuple):
     time: int = 0
 
 
-class CartPole(Environment[CartPoleState]):
+class CartPole(SoloEnv[CartPoleState]):
     """
     CartPole environment from OpenAI Gym.
     """
@@ -90,10 +90,10 @@ class CartPole(Environment[CartPoleState]):
 
     def get_observation(self, state: CartPoleState) -> Observation:
         return {
-            "a1": state.x,
-            "a2": state.x_dot,
-            "a3": state.theta,
-            "a4": state.theta_dot,
+            "a1": jnp.atleast_1d(state.x),
+            "a2": jnp.atleast_1d(state.x_dot),
+            "a3": jnp.atleast_1d(state.theta),
+            "a4": jnp.atleast_1d(state.theta_dot),
         }
 
     def get_reward(self):
@@ -110,12 +110,10 @@ class CartPole(Environment[CartPoleState]):
 
     def observation_space(self):
         return {
-            "obs": {
-                "a1": Box(0, 0, shape=(1,)),
-                "a2": Box(0, 0, shape=(1,)),
-                "a3": Box(0, 0, shape=(1,)),
-                "a4": Box(0, 0, shape=(1,)),
-            }
+            "a1": Box(0, 0, shape=(1,)),
+            "a2": Box(0, 0, shape=(1,)),
+            "a3": Box(0, 0, shape=(1,)),
+            "a4": Box(0, 0, shape=(1,)),
         }
 
     def action_space(self):

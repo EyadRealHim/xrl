@@ -1,6 +1,6 @@
-from .environment import Observation, Space, Box, Discrete, MultiDiscrete
+from .environment import Observation, Space, Box, Discrete, MultiDiscrete, Map
 
-from typing import Type, Sequence, Mapping
+from typing import Type, Sequence
 from jaxtyping import PyTree, Array, Float
 from optax import GradientTransformation, OptState
 
@@ -15,7 +15,7 @@ class ActorLike(eqx.Module):
     def __init__(self, key: Array, in_features: int):
         pass
 
-    def __call__(self, obs: Observation) -> Float[Array, "n"]:
+    def __call__(self, obs: Float[Array, "n"]) -> Float[Array, "m"]:
         raise NotImplementedError
 
 
@@ -23,24 +23,39 @@ class CriticLike(eqx.Module):
     def __init__(self, key: Array, in_features: int):
         pass
 
-    def __call__(self, obs: Observation) -> Float[Array, "n"]:
+    def __call__(self, obs: Float[Array, "n"]) -> Float[Array, "m"]:
         raise NotImplementedError
 
 
 class ObservationInterpreter(eqx.Module):
     out_features: int = eqx.field(static=True)
 
-    def __init__(self, obs: PyTree[Space]):
-        assert jax.tree.all(
-            jax.tree.map(lambda s: isinstance(s, Box) and len(s.shape) == 1, obs)
+    # for asserations
+    fields: Map[Sequence[int]] = eqx.field(static=True)
+
+    def __init__(self, obs: Map[Space]):
+        assert all(isinstance(x, Box) and len(x.shape) == 1 for x in obs.values())
+
+        self.out_features = sum(sum(x.shape) for x in obs.values())
+        self.fields = {k: space.shape for k, space in obs.items()}
+
+    def interpret(self, obs: Observation) -> Float[Array, "n"]:
+        assert isinstance(obs, dict), (
+            f"observation must be of type dict, instead got '{obs}' of type '{type(obs)}'"
         )
 
-        self.out_features = sum(sum(x.shape) for x in jax.tree.leaves(obs))
+        for k, shape in self.fields.items():
+            assert k in obs, f"field '{k}' is missing in observation: {obs}"
+            assert obs[k].shape == shape, (
+                f"field '{k}' in observation must be of shape '{shape}' as described by the environment, but instead got '{obs[k].shape}'"
+            )
 
-    def interpret(self, obs: PyTree[Observation]) -> Float[Array, "..."]:
-        return jnp.squeeze(
-            jnp.concat(jax.tree.leaves(jax.tree.map(jnp.atleast_1d, obs)))
-        )
+        for k in obs.keys():
+            assert k in self.fields, (
+                f"field '{k}' is not described by the environment observation"
+            )
+
+        return jnp.concatenate(jax.tree.leaves(obs), axis=0)
 
 
 class ActionInterpreter(eqx.Module):
@@ -49,25 +64,20 @@ class ActionInterpreter(eqx.Module):
     nvec: Sequence[Sequence[int]] = eqx.field(static=True)
     treedef: dict = eqx.field(static=True)
 
-    def __init__(self, action: PyTree[Space]):
-        assert jax.tree.all(
-            jax.tree.map(
-                lambda s: isinstance(s, Discrete) or isinstance(s, MultiDiscrete),
-                action,
-            )
+    def __init__(self, action: Map[Space]):
+        assert all(
+            isinstance(x, Discrete) or isinstance(x, MultiDiscrete)
+            for x in action.values()
         )
 
-        leaves, _ = jax.tree.flatten(action)
-        nvec = jax.tree.map(
-            lambda x: [x.n] if isinstance(x, Discrete) else x.nvec, leaves
-        )
-
-        self.out_features = sum(sum(x) for x in nvec)
-        self.nvec = nvec
+        self.nvec = [
+            [x.n] if isinstance(x, Discrete) else x.nvec for x in action.values()
+        ]
+        self.out_features = sum(sum(x) for x in self.nvec)
         self.treedef = dict(action)
 
     def interpret(self, logits: Float[Array, "n"]) -> PyTree[Float[Array, "n"]]:  # noqa: F821
-        assert logits.shape[0] == self.out_features
+        assert logits.shape[0] == self.out_features and len(logits.shape) == 1
 
         leaves = []
         logits_ = jax.lax.split(logits, [sum(x) for x in self.nvec])
@@ -98,8 +108,8 @@ class Actor(eqx.Module):
         self,
         key: Array,
         mactor: Type[ActorLike],
-        observation_space: PyTree[Space],
-        action_space: PyTree[Space],
+        observation_space: Map[Space],
+        action_space: Map[Space],
     ):
         self.observation = ObservationInterpreter(observation_space)
         self.action = ActionInterpreter(action_space)
@@ -128,9 +138,9 @@ class Actor(eqx.Module):
 
         return eqx.apply_updates(self, updates), opt
 
-    def __call__(self, obs: Float[Array, "..."]):
-        obs = self.observation.interpret(obs)
-        logits = self.head(self.actor(obs))
+    def __call__(self, obs: Observation):
+        obsv = self.observation.interpret(obs)
+        logits = self.head(self.actor(obsv))
 
         return self.action.interpret(logits)
 
@@ -141,7 +151,7 @@ class Critic(eqx.Module):
     head: eqx.nn.Linear
 
     def __init__(
-        self, key: Array, mcritic: Type[CriticLike], observation_space: PyTree[Space]
+        self, key: Array, mcritic: Type[CriticLike], observation_space: Map[Space]
     ):
         self.observation = ObservationInterpreter(observation_space)
         self.critic = mcritic(key=key, in_features=self.observation.out_features)
@@ -168,71 +178,7 @@ class Critic(eqx.Module):
 
         return eqx.apply_updates(self, updates), opt
 
-    def __call__(self, obs: Float[Array, "..."]):
-        obs = self.observation.interpret(obs)
+    def __call__(self, obs: Observation):
+        obsv = self.observation.interpret(obs)
 
-        return self.head(self.critic(obs))
-
-
-class ActorContainer(eqx.Module):
-    actors: Mapping[str, Actor]
-
-    @staticmethod
-    def create(
-        key: Array,
-        mactor: Type[ActorLike],
-        observation_space: Mapping[str, PyTree[Space]],
-        action_space: Mapping[str, PyTree[Space]],
-    ):
-        actors = {}
-
-        for name, act_space, obs_space in zip(
-            action_space.keys(), action_space.values(), observation_space.values()
-        ):
-            key, subkey = jax.random.split(key)
-            actors[name] = Actor(subkey, mactor, obs_space, act_space)
-
-        return ActorContainer(actors=actors)
-
-    def opt_state(self, optim: GradientTransformation):
-        return {k: actor.opt_state(optim) for k, actor in self.actors.items()}
-
-    def update(self, grad, opt: dict[str, OptState], optim: GradientTransformation):
-        return {
-            k: actor.update(grad[k], opt[k], optim) for k, actor in self.actors.items()
-        }
-
-    def __call__(self, obs: Mapping[str, Float[Array, "..."]]):
-        return {k: actor(obs[k]) for k, actor in self.actors.items()}
-
-
-class CriticContainer(eqx.Module):
-    critics: Mapping[str, Critic]
-
-    @staticmethod
-    def create(
-        key: Array,
-        mcritic: Type[CriticLike],
-        observation_space: Mapping[str, PyTree[Space]],
-    ):
-        critics = {}
-
-        for name, obs_space in zip(
-            observation_space.keys(), observation_space.values()
-        ):
-            key, subkey = jax.random.split(key)
-            critics[name] = Critic(subkey, mcritic, obs_space)
-
-        return CriticContainer(critics=critics)
-
-    def opt_state(self, optim: GradientTransformation):
-        return {k: critic.opt_state(optim) for k, critic in self.critics.items()}
-
-    def update(self, grad, opt: dict[str, OptState], optim: GradientTransformation):
-        return {
-            k: critic.update(grad[k], opt[k], optim)
-            for k, critic in self.critics.items()
-        }
-
-    def __call__(self, obs: Mapping[str, Float[Array, "..."]]):
-        return {k: critic(obs[k]) for k, critic in self.critics.items()}
+        return self.head(self.critic(obsv))

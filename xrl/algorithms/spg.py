@@ -1,16 +1,8 @@
-from .algorithm import _RLAgent, RLTrainer, Transition, UpdatedPkg
-from ..environment import ParallelEnvironment, TState
-from ..networks import (
-    ActorLike,
-    CriticLike,
-    Actor,
-    Critic,
-    ActorContainer,
-    CriticContainer,
-)
+from .algorithm import RLTrainer, Transition, UpdatePkg
+from ..environment import TState
 
-from typing import Generic, Type, Tuple
-from jaxtyping import PyTree, Array, Float
+from typing import Generic, Tuple
+from jaxtyping import Array, Float
 
 from distrax import Categorical
 
@@ -20,51 +12,17 @@ import equinox as eqx
 import jax
 
 
-class SimplePolicyGradientAgent(_RLAgent):
-    pass
-
-
-class SimplePolicyGradientTrainer(
-    RLTrainer[TState, SimplePolicyGradientAgent], Generic[TState]
-):
+class SimplePolicyGradientTrainer(RLTrainer[TState], Generic[TState]):
     discount: float = eqx.field(static=True, default=0.96)
     lambda_: float = eqx.field(static=True, default=0.95)
 
-    def make_agent(
-        self, key: Array, mactor: Type[ActorLike], mcritic: Type[CriticLike]
-    ) -> SimplePolicyGradientAgent:
-        ActorConstuct = Actor
-        CriticConstruct = Critic
-
-        if isinstance(self.env, ParallelEnvironment):
-            ActorConstuct = ActorContainer.create
-            CriticConstruct = CriticContainer.create
-
-        a, b = jax.random.split(key)
-
-        actor = ActorConstuct(
-            a, mactor, self.env.observation_space(), self.env.action_space()
-        )
-        critic = CriticConstruct(b, mcritic, self.env.observation_space())
-
-        return SimplePolicyGradientAgent(
-            actor=actor,
-            critic=critic,
-            opt={
-                "actor": actor.opt_state(self.optim),
-                "critic": critic.opt_state(self.optim),
-            },
-        )
-
-    def update(self, pkg):
-        obs, transition, actor, critic, optactor, optcritic = pkg
-
+    def update(self, actor, critic, optactor, optcritic, transition, bootstraps):
         advantage, returns = jax.vmap(self.compute_advantage_and_returns)(
-            transition, jax.vmap(critic)(obs)
+            transition, jax.vmap(critic)(bootstraps)
         )
 
         @eqx.filter_grad
-        def actor_loss(actor: Actor, obs, action: PyTree, advantage):
+        def actor_loss(actor, obs, action, advantage):
             logits = jax.vmap(jax.vmap(actor))(obs)
             log_p = jax.tree.map(
                 lambda logits, action: Categorical(logits=logits).log_prob(action),
@@ -78,7 +36,7 @@ class SimplePolicyGradientTrainer(
             return -jnp.array(jax.tree.leaves(losses)).mean()
 
         @eqx.filter_grad
-        def critic_loss(critic: Critic, obs, returns):
+        def critic_loss(critic, obs, returns):
             values = jnp.squeeze(jax.vmap(jax.vmap(critic))(obs))
 
             return ((values - returns) ** 2).mean()
@@ -89,11 +47,11 @@ class SimplePolicyGradientTrainer(
         grad = critic_loss(critic, transition.observation, returns)
         critic, optcritic = critic.update(grad, optcritic, self.optim)
 
-        return UpdatedPkg(
+        return UpdatePkg(
             actor=actor,
             critic=critic,
-            opt_actor=optactor,
-            opt_critic=optcritic,
+            optactor=optactor,
+            optcritic=optcritic,
         )
 
     def compute_advantage_and_returns(
