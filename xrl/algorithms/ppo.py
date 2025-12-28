@@ -28,18 +28,22 @@ class PPOTrainer(RLTrainer[TState], Generic[TState]):
         def act(actor, obs, action):
             logits = jax.vmap(jax.vmap(actor))(obs)
 
-            def fun(logits, action):
-                dist = Categorical(logits=logits)
+            log_probs = jax.tree.map(
+                lambda logits, action: Categorical(logits=logits).log_prob(action),
+                logits,
+                action,
+            )
+            log_probs = jnp.concat(jax.tree.leaves(log_probs), axis=-1)
 
-                return dist.log_prob(action), dist.entropy()
+            entropies = jax.tree.map(
+                lambda logits: Categorical(logits=logits).entropy(), logits
+            )
+            entropies = jnp.concat(jax.tree.leaves(entropies), axis=-1)
 
-            acttree = jax.tree.map(fun, logits, action)
-            acttree = jnp.squeeze(jnp.array(jax.tree.leaves(acttree)))
-
-            return acttree[0], acttree[1]
+            return log_probs, entropies
 
         def values(critic, obs):
-            return jnp.squeeze(jax.vmap(jax.vmap(critic))(obs))
+            return jax.vmap(jax.vmap(critic))(obs)
 
         init_log_p, _ = act(actor, transition.observation, transition.action)
         init_value = values(critic, transition.observation)
@@ -49,6 +53,7 @@ class PPOTrainer(RLTrainer[TState], Generic[TState]):
             log_p, entropy = act(actor, obs, action)
 
             ratio = jnp.exp(log_p - init_log_p)
+            advantage = jnp.expand_dims(advantage, axis=-1)
 
             return (
                 -jnp.minimum(
@@ -61,6 +66,7 @@ class PPOTrainer(RLTrainer[TState], Generic[TState]):
         @eqx.filter_grad
         def critic_loss(critic, obs, returns):
             value = values(critic, obs)
+            returns = jnp.expand_dims(returns, axis=-1)
 
             loss1 = (value - returns) ** 2
 

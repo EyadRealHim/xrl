@@ -1,4 +1,5 @@
 from .environment import Observation, Space, Box, Discrete, MultiDiscrete, Map
+from .xrl_tree import of_instance
 
 from typing import Type, Sequence
 from jaxtyping import PyTree, Array, Float
@@ -61,8 +62,7 @@ class ObservationInterpreter(eqx.Module):
 class ActionInterpreter(eqx.Module):
     out_features: int = eqx.field(static=True)
 
-    nvec: Sequence[Sequence[int]] = eqx.field(static=True)
-    treedef: dict = eqx.field(static=True)
+    tree: Map[Sequence[int]] = eqx.field(static=True)
 
     def __init__(self, action: Map[Space]):
         assert all(
@@ -70,31 +70,37 @@ class ActionInterpreter(eqx.Module):
             for x in action.values()
         )
 
-        self.nvec = [
-            [x.n] if isinstance(x, Discrete) else x.nvec for x in action.values()
-        ]
-        self.out_features = sum(sum(x) for x in self.nvec)
-        self.treedef = dict(action)
+        self.tree = jax.tree.map(
+            lambda x: [x.n] if isinstance(x, Discrete) else x.nvec, action
+        )
+
+        self.out_features = jax.tree.reduce(
+            lambda x, y: x + sum(y), self.tree, 0, is_leaf=of_instance(list)
+        )
 
     def interpret(self, logits: Float[Array, "n"]) -> PyTree[Float[Array, "n"]]:  # noqa: F821
         assert logits.shape[0] == self.out_features and len(logits.shape) == 1
 
-        leaves = []
-        logits_ = jax.lax.split(logits, [sum(x) for x in self.nvec])
+        return jax.tree.map(
+            lambda nvec, logits: self.remap(nvec, jnp.concat(logits, axis=0)),
+            self.tree,
+            jax.tree.unflatten(
+                jax.tree.structure(self.tree),
+                jax.lax.split(logits, jax.tree.leaves(self.tree)),
+            ),
+            is_leaf=of_instance(list),
+        )
 
-        for v, logits in zip(self.nvec, logits_):
-            nvec = np.array(v)
-            y, x = len(nvec), nvec.max()
-            grid = jnp.full((y, x), -jnp.inf, dtype=jnp.float32)
+    @staticmethod
+    def remap(nvec_list: Sequence[int], logits: Float[Array, "n"]):
+        nvec = np.array(nvec_list)
+        y, x = len(nvec), nvec.max()
+        grid = jnp.full((y, x), -jnp.inf, dtype=jnp.float32)
 
-            rows = np.repeat(np.arange(y), nvec)
-            cols = np.arange(nvec.sum()) - np.repeat(np.cumsum(nvec) - nvec, nvec)
+        rows = np.repeat(np.arange(y), nvec)
+        cols = np.arange(nvec.sum()) - np.repeat(np.cumsum(nvec) - nvec, nvec)
 
-            logits = grid.at[rows, cols].set(logits)
-
-            leaves.append(logits)
-
-        return jax.tree.unflatten(jax.tree.structure(self.treedef), leaves)
+        return grid.at[rows, cols].set(logits)
 
 
 class Actor(eqx.Module):

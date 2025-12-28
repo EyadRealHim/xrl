@@ -6,8 +6,9 @@ from jaxtyping import PyTree, Array, Float, Bool
 from optax import OptState, GradientTransformation
 
 from ..xrl_tree import of_instance, keys_like
+from rich.console import Console
+from rich.progress import track
 from distrax import Categorical
-from tqdm import tqdm
 
 import jax.numpy as jnp
 import equinox as eqx
@@ -143,11 +144,11 @@ class RLTrainer(eqx.Module, Generic[TState]):
 
         rs = RolloutState(key=jax.random.split(key, self.env_n), state=state, obs=obs)
 
-        print("Compiling training cycle...")
         train_cycle = eqx.filter_jit(self.train_cycle)
-        _ = jax.block_until_ready(train_cycle(rs, agent))
+        with Console().status("[bold orchid] Compiling training cycle", spinner="dots"):
+            _ = jax.block_until_ready(train_cycle(rs, agent))
 
-        for _ in tqdm(range(iterations)):
+        for _ in track(range(iterations), "Training"):
             rs, agent = train_cycle(rs, agent)
 
         return agent
