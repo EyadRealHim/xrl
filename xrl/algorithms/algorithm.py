@@ -1,11 +1,11 @@
 from ..environment import SoloEnv, GroupEnv, TState, Observation, Action, Map, TimeStep
 from ..networks import Actor, ActorLike, Critic, CriticLike
 
-from typing import Union, Generic, NamedTuple, Tuple, Type
+from typing import Union, Generic, NamedTuple, Tuple, Type, TypeVar
 from jaxtyping import PyTree, Array, Float, Bool
-from optax import OptState, GradientTransformation
+from optax import OptState, GradientTransformation, Updates
 
-from ..xrl_tree import of_instance, keys_like
+from ..xrl_tree import of_instance, keys_like, prefix
 from rich.console import Console
 from rich.progress import track
 from distrax import Categorical
@@ -38,15 +38,17 @@ class RLAgent(eqx.Module):
     optcritic: PyTree[OptState]
 
 
-class UpdatePkg(NamedTuple):
-    actor: Actor
-    critic: Critic
+# class UpdatePkg(NamedTuple):
+#     actor: Actor
+#     critic: Critic
 
-    optactor: OptState
-    optcritic: OptState
+#     optactor: OptState
+#     optcritic: OptState
+
+TData = TypeVar("TData")
 
 
-class RLTrainer(eqx.Module, Generic[TState]):
+class RLTrainer(eqx.Module, Generic[TState, TData]):
     env: Union[SoloEnv[TState], GroupEnv[TState]] = eqx.field(static=True)
     optim: GradientTransformation = eqx.field(static=True)
 
@@ -54,15 +56,14 @@ class RLTrainer(eqx.Module, Generic[TState]):
     cycle_n: int = eqx.field(static=True, default=64)
     step_n: int = eqx.field(static=True, default=128)
 
-    def update(
-        self,
-        actor: Actor,
-        critic: Critic,
-        optactor: OptState,
-        optcritic: OptState,
-        transition: Transition,
-        bootstraps: Observation,
-    ) -> UpdatePkg:
+    def gradient(
+        self, actor: Actor, critic: Critic, data: TData
+    ) -> Tuple[Updates, Updates]:
+        raise NotImplementedError
+
+    def compute_data(
+        self, agent: RLAgent, rs: RolloutState[TState]
+    ) -> Tuple[RolloutState[TState], PyTree[TData]]:
         raise NotImplementedError
 
     def make_agent(
@@ -106,30 +107,37 @@ class RLTrainer(eqx.Module, Generic[TState]):
             ),
         )
 
-    def train_step(
-        self, rs: RolloutState[TState], agent: RLAgent
-    ) -> Tuple[RolloutState[TState], RLAgent]:
-        rs, transition = jax.vmap(self.rollout, in_axes=(0, None))(rs, agent)
+    def map(self, fn, agent: RLAgent, *trees):
+        assert len(trees) > 0
+        assert all(prefix(tree) == prefix(trees[0]) for tree in trees)
 
-        pkgs = jax.tree.map(
-            self.update,
+        return jax.tree.map(
+            fn,
             agent.actor,
             agent.critic,
-            agent.optactor,
-            agent.optcritic,
-            transition,
-            rs.obs,
+            *trees,
             is_leaf=of_instance(Actor),
         )
 
-        def isleaf(x):
-            return isinstance(x, UpdatePkg)
+    def update(self, agent: RLAgent, data: TData) -> RLAgent:
+        gradient = self.map(self.gradient, agent, data)
 
-        return rs, RLAgent(
-            actor=jax.tree.map(lambda x: x.actor, pkgs, is_leaf=isleaf),
-            critic=jax.tree.map(lambda x: x.critic, pkgs, is_leaf=isleaf),
-            optactor=jax.tree.map(lambda x: x.optactor, pkgs, is_leaf=isleaf),
-            optcritic=jax.tree.map(lambda x: x.optcritic, pkgs, is_leaf=isleaf),
+        def lambda_(actor, critic, opta, optc, grad):
+            actor_grad, critic_grad = grad
+
+            actor, opta = actor.update(actor_grad, opta, self.optim)
+            critic, optc = critic.update(critic_grad, optc, self.optim)
+
+            return actor, critic, opta, optc
+
+        pkgs = self.map(lambda_, agent, agent.optactor, agent.optcritic, gradient)
+        isleaf = of_instance(tuple)
+
+        return RLAgent(
+            actor=jax.tree.map(lambda x: x[0], pkgs, is_leaf=isleaf),
+            critic=jax.tree.map(lambda x: x[1], pkgs, is_leaf=isleaf),
+            optactor=jax.tree.map(lambda x: x[2], pkgs, is_leaf=isleaf),
+            optcritic=jax.tree.map(lambda x: x[3], pkgs, is_leaf=isleaf),
         )
 
     def train(
@@ -162,7 +170,10 @@ class RLTrainer(eqx.Module, Generic[TState]):
             rs, params = pair
 
             agent = eqx.combine(params, static)
-            rs, agent = self.train_step(rs, agent)
+
+            rs, data = self.compute_data(agent, rs)
+            agent = self.update(agent, data)
+
             params = eqx.filter(agent, eqx.is_array)
 
             return rs, params
@@ -178,18 +189,14 @@ class RLTrainer(eqx.Module, Generic[TState]):
         def step(rs: RolloutState[TState], _):
             key, state, obs = rs
 
-            logits = jax.tree.map(
-                lambda actor, obsv: actor(obsv),
-                agent.actor,
+            pairs = self.map(
+                lambda actor, critic, obsv: (actor(obsv), critic(obsv)),
+                agent,
                 obs,
-                is_leaf=of_instance(Actor),
             )
-            value = jax.tree.map(
-                lambda critic, obsv: critic(obsv),
-                agent.critic,
-                obs,
-                is_leaf=of_instance(Critic),
-            )
+
+            logits = jax.tree.map(lambda p: p[0], pairs, is_leaf=of_instance(tuple))
+            value = jax.tree.map(lambda p: p[1], pairs, is_leaf=of_instance(tuple))
 
             key, action_key = jax.random.split(key)
             action = jax.tree.map(
@@ -235,12 +242,8 @@ class RLTrainer(eqx.Module, Generic[TState]):
         for _ in range(max_steps - 1):
             key, actionk = jax.random.split(key)
 
-            logits = jax.tree.map(
-                lambda actor, obsv: actor(obsv),
-                agent.actor,
-                obs,
-                is_leaf=of_instance(Actor),
-            )
+            logits = self.map(lambda actor, _, obsv: actor(obsv), agent, obs)
+
             if not deterministic:
                 action = jax.tree.map(
                     lambda key, logits: Categorical(logits=logits).sample(seed=key),
@@ -267,3 +270,12 @@ class RLTrainer(eqx.Module, Generic[TState]):
 
             if done:
                 break
+
+    def save(self, filename: str):
+        with open(filename, "wb") as file:
+            eqx.tree_serialise_leaves(file, self)
+
+    @staticmethod
+    def load(filename: str):
+        with open(filename, "rb") as file:
+            eqx.tree_deserialise_leaves(file, RLTrainer)

@@ -1,8 +1,9 @@
-from .algorithm import RLTrainer, Transition
-from ..environment import TState
+from xrl.networks import Actor, ActorLike, Critic, CriticLike
+from .algorithm import RLTrainer, Transition, RLAgent
+from ..environment import GroupEnv, TState
 from ..xrl_tree import of_instance
 
-from typing import Generic, Tuple, NamedTuple
+from typing import Generic, Tuple, NamedTuple, Type
 from jaxtyping import Array, Float
 
 from distrax import Categorical
@@ -22,7 +23,7 @@ class PPOData(NamedTuple):
     value: Float[Array, "..."]
 
 
-class PPOTrainer(RLTrainer[TState, PPOData], Generic[TState]):
+class SelfPlayPPOTrainer(RLTrainer[TState, PPOData], Generic[TState]):
     discount: float = eqx.field(static=True, default=0.96)
     lambda_: float = eqx.field(static=True, default=0.95)
 
@@ -30,13 +31,86 @@ class PPOTrainer(RLTrainer[TState, PPOData], Generic[TState]):
     clip_coef: float = 0.2
     entropy_coef: float = 0.01
 
+    def make_agent(
+        self, key: Array, actor: Type[ActorLike], critic: Type[CriticLike]
+    ) -> RLAgent:
+        observation = self.env.observation_space()
+        action = self.env.action_space()
+
+        assert isinstance(self.env, GroupEnv), "only multi agent is support"
+
+        def is_leaf(x):
+            return id(x) != id(observation)
+
+        assert jax.tree.all(
+            jax.tree.map(
+                lambda a, b: type(a) is type(b)
+                and a.shape == b.shape
+                and a.dtype == b.dtype,
+                *jax.tree.leaves(observation, lambda x: id(x) != id(observation)),
+            )
+        ), "Agents observation space must be the same"
+        assert jax.tree.all(
+            jax.tree.map(
+                lambda a, b: type(a) is type(b)
+                and a.shape == b.shape
+                and a.dtype == b.dtype,
+                *jax.tree.leaves(action, lambda x: id(x) != id(action)),
+            )
+        ), "Agents action space must be the same"
+
+        obs = jax.tree.leaves(observation, lambda x: id(x) != id(observation))[0]
+        act = jax.tree.leaves(action, lambda x: id(x) != id(action))[0]
+
+        actork, critick = jax.random.split(key)
+        actors = Actor(actork, actor, obs, act)
+        critics = Critic(critick, critic, obs)
+
+        return RLAgent(
+            actor=actors,
+            critic=critics,
+            optactor=jax.tree.map(
+                lambda actor: actor.opt_state(self.optim),
+                actors,
+                is_leaf=of_instance(Actor),
+            ),
+            optcritic=jax.tree.map(
+                lambda critic: critic.opt_state(self.optim),
+                critics,
+                is_leaf=of_instance(Critic),
+            ),
+        )
+
+    def map(self, fn, agent: RLAgent, *trees):
+        tree, *trees = trees
+        return jax.tree.map(
+            lambda *x: fn(agent.actor, agent.critic, *x),
+            tree,
+            *trees,
+            is_leaf=lambda x: id(x) != id(tree),
+        )
+
+    def _update(self, agent: RLAgent, data: PPOData) -> RLAgent:
+        gradient = self.map(self.gradient, agent, data)
+
+        updates = jax.tree.leaves(gradient, is_leaf=lambda x: id(x) != id(gradient))
+        actor_grad, critic_grad = jax.tree.map(lambda x, y: x + y, *updates)
+
+        actor, optactor = agent.actor.update(actor_grad, agent.optactor, self.optim)
+        critic, optcritic = agent.critic.update(
+            critic_grad, agent.optcritic, self.optim
+        )
+
+        return RLAgent(
+            actor=actor, critic=critic, optactor=optactor, optcritic=optcritic
+        )
+
     def update(self, agent, data):
         params, static = eqx.partition(agent, eqx.is_array)
-        update = super().update
 
         def epoch(_, params):
             agent = eqx.combine(params, static)
-            agent = update(agent, data)
+            agent = self._update(agent, data)
 
             params = eqx.filter(agent, eqx.is_array)
 

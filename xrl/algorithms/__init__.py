@@ -1,7 +1,7 @@
-from .spg import SimplePolicyGradientTrainer
+from .selfplay_ppo import SelfPlayPPOTrainer
 from .ppo import PPOTrainer
 
 __all__ = [
-    "SimplePolicyGradientTrainer",
+    "SelfPlayPPOTrainer",
     "PPOTrainer",
 ]
