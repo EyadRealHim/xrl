@@ -2,7 +2,6 @@ from xrl.envs.pong import Pong
 from xrl.algorithms import PPOTrainer
 from xrl.networks import ActorLike, CriticLike
 
-from tqdm import tqdm
 
 import equinox as eqx
 
@@ -39,22 +38,8 @@ trainer = PPOTrainer(env=env, optim=optax.adam(1e-3), env_n=4)
 agent = trainer.make_agent(subk, PongActor, PongCritic)
 agent = trainer.train(key, agent, iterations=32)
 
-frames = [
-    env.render(state)
-    for state in tqdm(
-        trainer.capture(
-            key=jax.random.key(817),
-            agent=agent,
-            max_steps=300,
-        )
-    )
-]
 
-duration = int(1000 / 30)
-frames[0].save(
-    "pong.gif",
-    save_all=True,
-    append_images=frames[1:],
-    duration=duration,
-    loop=0,
+trainer.record(
+    "/gehaz/pong.mp4",
+    trainer.capture(key=jax.random.key(817), agent=agent, max_steps=300),
 )

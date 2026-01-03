@@ -2,8 +2,6 @@ from xrl.envs.cartpole import CartPole
 from xrl.algorithms import PPOTrainer
 from xrl.networks import ActorLike, CriticLike
 
-from tqdm import tqdm
-
 import equinox as eqx
 
 import optax
@@ -30,31 +28,16 @@ class CartPoleActor(ActorLike):
         return self.actor(obs)
 
 
-key = jax.random.key(0)
+key = jax.random.key(1)
 env = CartPole()
 
 key, subk = jax.random.split(key)
-trainer = PPOTrainer(env=env, optim=optax.adam(1e-3), env_n=4)
+trainer = PPOTrainer(env=env, optim=optax.adam(1e-4), env_n=4)
 
 agent = trainer.make_agent(subk, CartPoleActor, CartPoleCritic)
-agent = trainer.train(key, agent, iterations=32)
+agent = trainer.train(key, agent, iterations=128)
 
-frames = [
-    env.render(state)
-    for state in tqdm(
-        trainer.capture(
-            key=jax.random.key(817),
-            agent=agent,
-            max_steps=300,
-        )
-    )
-]
-
-duration = int(1000 / 30)
-frames[0].save(
-    "cartpole.gif",
-    save_all=True,
-    append_images=frames[1:],
-    duration=duration,
-    loop=0,
+trainer.record(
+    "/gehaz/cartpole.mp4",
+    trainer.capture(key=jax.random.key(817), agent=agent, max_steps=300),
 )
