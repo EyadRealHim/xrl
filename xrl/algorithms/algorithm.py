@@ -1,7 +1,7 @@
 from ..environment import SoloEnv, GroupEnv, TState, Observation, Action, Map, TimeStep
 from ..networks import Actor, ActorLike, Critic, CriticLike
 
-from typing import Union, Generic, NamedTuple, Tuple, Type, TypeVar
+from typing import Optional, Union, Generic, NamedTuple, Tuple, Type, TypeVar, Iterable
 from jaxtyping import PyTree, Array, Float, Bool
 from optax import OptState, GradientTransformation, Updates
 
@@ -9,6 +9,8 @@ from ..xrl_tree import of_instance, keys_like, prefix
 from rich.console import Console
 from rich.progress import track
 from distrax import Categorical
+from itertools import chain
+from pathlib import Path
 
 import jax.numpy as jnp
 import equinox as eqx
@@ -37,13 +39,6 @@ class RLAgent(eqx.Module):
     optactor: PyTree[OptState]
     optcritic: PyTree[OptState]
 
-
-# class UpdatePkg(NamedTuple):
-#     actor: Actor
-#     critic: Critic
-
-#     optactor: OptState
-#     optcritic: OptState
 
 TData = TypeVar("TData")
 
@@ -108,8 +103,7 @@ class RLTrainer(eqx.Module, Generic[TState, TData]):
         )
 
     def map(self, fn, agent: RLAgent, *trees):
-        assert len(trees) > 0
-        assert all(prefix(tree) == prefix(trees[0]) for tree in trees)
+        assert len(trees) > 0, "need at least one tree to map over"
 
         return jax.tree.map(
             fn,
@@ -271,11 +265,45 @@ class RLTrainer(eqx.Module, Generic[TState, TData]):
             if done:
                 break
 
-    def save(self, filename: str):
-        with open(filename, "wb") as file:
-            eqx.tree_serialise_leaves(file, self)
+    def record(
+        self,
+        filename: Union[Path, str],
+        states: Iterable[TState],
+        total: Optional[int] = None,
+        fps: Optional[int] = 30,
+    ):
+        import numpy as np
+        import av
 
-    @staticmethod
-    def load(filename: str):
-        with open(filename, "rb") as file:
-            eqx.tree_deserialise_leaves(file, RLTrainer)
+        it = iter(states)
+        try:
+            first_state = next(it)
+        except StopIteration:
+            print("[WARING]: No video is recorded, the iterable is emtpy.")
+            return
+
+        full_it = chain([first_state], it)
+
+        if total is None:
+            if hasattr(states, "__len__"):
+                total = len(states)
+
+        container = av.open(str(filename), mode="w")
+
+        first_img = self.env.render(first_state).convert("RGB")
+
+        stream = container.add_stream("libx264", rate=fps)
+        stream.width, stream.height = first_img.size
+        stream.pix_fmt = "yuv420p"
+
+        for state in track(full_it, description="Rendering", total=total):
+            img = self.env.render(state).convert("RGB")
+            frame = av.VideoFrame.from_ndarray(np.array(img), format="rgb24")
+
+            for packet in stream.encode(frame):
+                container.mux(packet)
+
+        for packet in stream.encode():
+            container.mux(packet)
+
+        container.close()

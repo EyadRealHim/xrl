@@ -175,3 +175,6 @@ class GroupEnv(eqx.Module, Generic[TState]):
 
     def action_space(self) -> Map[Map[Space]]:
         raise NotImplementedError
+
+    def render(self, state: TState) -> Image.Image:
+        raise NotImplementedError
