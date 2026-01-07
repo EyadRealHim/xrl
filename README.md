@@ -111,6 +111,11 @@ trainer.record(
 
 ```
 
+<video src="examples/cartpole.mp4" controls width="600">
+  Your browser does not support the video tag.
+</video>
+
+
 ## Unified Multi-Agent Support
 
 A key feature of xRL is its **unified interface** for both single and multi-agent scenarios. Every trainer in xRL is polymorphic, supporting both `SoloEnv` and `GroupEnv` architectures without requiring code changes to the training loop.
