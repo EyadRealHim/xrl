@@ -1,11 +1,12 @@
 from ..environment import SoloEnv, GroupEnv, TState, Observation, Action, Map, TimeStep
 from ..networks import Actor, ActorLike, Critic, CriticLike
 
-from typing import Optional, Union, Generic, NamedTuple, Tuple, Type, TypeVar, Iterable
+from typing import Optional, Union, Generic, NamedTuple, Tuple, Type, TypeVar
 from jaxtyping import PyTree, Array, Float, Bool
 from optax import OptState, GradientTransformation, Updates
+from collections.abc import Iterable
 
-from ..xrl_tree import of_instance, keys_like, prefix
+from ..xrl_tree import of_instance, keys_like
 from rich.console import Console
 from rich.progress import track
 from distrax import Categorical
@@ -38,6 +39,21 @@ class RLAgent(eqx.Module):
 
     optactor: PyTree[OptState]
     optcritic: PyTree[OptState]
+
+
+T = TypeVar("T")
+
+
+class SizedIterable(Generic[T]):
+    def __init__(self, iterable: Iterable[T], length: int):
+        self.iterable = iterable
+        self.length = length
+
+    def __iter__(self):
+        return iter(self.iterable)
+
+    def __len__(self):
+        return self.length
 
 
 TData = TypeVar("TData")
@@ -228,42 +244,45 @@ class RLTrainer(eqx.Module, Generic[TState, TData]):
     def capture(
         self, key: Array, agent: RLAgent, max_steps=999, deterministic: bool = False
     ):
-        key, subkey = jax.random.split(key)
-        state, obs = self.env.reset(subkey)
-
-        yield state
-
-        for _ in range(max_steps - 1):
-            key, actionk = jax.random.split(key)
-
-            logits = self.map(lambda actor, _, obsv: actor(obsv), agent, obs)
-
-            if not deterministic:
-                action = jax.tree.map(
-                    lambda key, logits: Categorical(logits=logits).sample(seed=key),
-                    keys_like(key, jax.tree.structure(logits)),
-                    logits,
-                )
-            else:
-                action = jax.tree.map(
-                    lambda logits: jnp.argmax(logits, axis=-1),
-                    logits,
-                )
-
-            key, stepk = jax.random.split(key)
-            state, time, obs = self.env.step(stepk, state, action)
+        def generator(key, agent, deterministic):
+            key, subkey = jax.random.split(key)
+            state, obs = self.env.reset(subkey)
 
             yield state
 
-            done = jax.tree.reduce(
-                lambda a, b: jnp.logical_or(a, b.done),
-                time,
-                False,
-                is_leaf=lambda x: isinstance(x, TimeStep),
-            )
+            for _ in range(max_steps - 1):
+                key, actionk = jax.random.split(key)
 
-            if done:
-                break
+                logits = self.map(lambda actor, _, obsv: actor(obsv), agent, obs)
+
+                if not deterministic:
+                    action = jax.tree.map(
+                        lambda key, logits: Categorical(logits=logits).sample(seed=key),
+                        keys_like(key, jax.tree.structure(logits)),
+                        logits,
+                    )
+                else:
+                    action = jax.tree.map(
+                        lambda logits: jnp.argmax(logits, axis=-1),
+                        logits,
+                    )
+
+                key, stepk = jax.random.split(key)
+                state, time, obs = self.env.step(stepk, state, action)
+
+                yield state
+
+                done = jax.tree.reduce(
+                    lambda a, b: jnp.logical_or(a, b.done),
+                    time,
+                    False,
+                    is_leaf=lambda x: isinstance(x, TimeStep),
+                )
+
+                if done:
+                    break
+
+        return SizedIterable(generator(key, agent, deterministic), length=max_steps)
 
     def record(
         self,
