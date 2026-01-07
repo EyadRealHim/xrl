@@ -111,9 +111,7 @@ trainer.record(
 
 ```
 
-<video src="examples/cartpole.mp4" controls width="600">
-  Your browser does not support the video tag.
-</video>
+![CartPole Training](examples/cartpole.gif)
 
 
 ## Unified Multi-Agent Support
