@@ -10,7 +10,7 @@ dependencies = [
   "optax>=0.2.8",
   "rich>=15.0.0",
 ]
-description = "xrl: JAX A2Cment learning"
+description = "xrl: JAX Reinforcement learning"
 name = "xrl"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -18,5 +18,5 @@ version = "0.1.0"
 
 [dependency-groups]
 dev = [
-    "mypy>=2.4.1",
+  "mypy>=2.4.1",
 ]

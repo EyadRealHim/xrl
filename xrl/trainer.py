@@ -79,7 +79,7 @@ class Trainer[EnvState, Agent, AgentConfig: eqx.Module](eqx.Module):
             )
 
             for i in range(iterations - 1):
-                rs, agent = train_cycle(rs, agent)
+                rs, agent = jax.block_until_ready(train_cycle(rs, agent))
                 steps = self.step_n * self.env_n * self.cycle_n * (i + 2)
 
                 progress.update(task, advance=1, steps=f"{steps:,}")
