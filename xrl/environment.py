@@ -129,24 +129,71 @@ class MonoEnv[TState](eqx.Module):
 
         return state, time, obs, info
 
-    @jaxtyped(typechecker=beartype)
     def reset(self, key: Key[Array, ""]) -> tuple[TState, Observation]:
         raise NotImplementedError
 
-    @jaxtyped(typechecker=beartype)
     def step(
         self, key: Array, state: TState, action: Action
     ) -> tuple[TState, MonoTimeStep, Observation, EnvInfo]:
         raise NotImplementedError
 
-    @jaxtyped(typechecker=beartype)
     def observation_space(self) -> PyTree[Space]:
         raise NotImplementedError
 
-    @jaxtyped(typechecker=beartype)
     def action_space(self) -> PyTree[Space]:
         raise NotImplementedError
 
+    def render(self, state: TState) -> UInt8[Array, "height width 3"]:
+        raise NotImplementedError
+
+
+@jaxtyped(typechecker=beartype)
+class PolyTimeStep[T](eqx.Module):
+    reward: PyTree[Float[Array, ""], "T"]
+    inactive: PyTree[Bool[Array, ""], "T"]
+    terminated: Bool[Array, ""]
+    truncated: Bool[Array, ""]
+
+
+class PolyEnv[TState](eqx.Module):
+    """
+    an envitonment for a multi-agent
+    """
+
     @jaxtyped(typechecker=beartype)
+    def autostep(
+        self,
+        key: Key[Array, ""],
+        state: TState,
+        action: PyTree[Action],
+    ) -> tuple[TState, PolyTimeStep, PyTree[Observation], EnvInfo]:
+        key, stepk = jax.random.split(key)
+        state, time, obs, info = self.step(stepk, state, action)
+
+        info[TERMINAL_OBSERVATION] = obs
+
+        state, obs = jax.lax.cond(
+            jnp.logical_or(time.terminated, time.truncated),
+            self.reset,
+            lambda _: (state, obs),
+            key,
+        )
+
+        return state, time, obs, info
+
+    def reset(self, key: Key[Array, ""]) -> tuple[TState, PyTree[Observation]]:
+        raise NotImplementedError
+
+    def step(
+        self, key: Array, state: TState, action: PyTree[Action]
+    ) -> tuple[TState, PolyTimeStep, PyTree[Observation], EnvInfo]:
+        raise NotImplementedError
+
+    def observation_space(self) -> PyTree[Space]:
+        raise NotImplementedError
+
+    def action_space(self) -> PyTree[Space]:
+        raise NotImplementedError
+
     def render(self, state: TState) -> UInt8[Array, "height width 3"]:
         raise NotImplementedError

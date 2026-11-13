@@ -1,6 +1,10 @@
 import jax
 from beartype import beartype
-from jaxtyping import Array, Key, jaxtyped
+from jaxtyping import Array, Key, PyTree, jaxtyped
+
+
+def prefix(tree: PyTree):
+    return jax.tree.structure(tree, is_leaf=lambda x: id(x) != id(tree))
 
 
 @jaxtyped(typechecker=beartype)

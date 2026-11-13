@@ -143,13 +143,18 @@ class A2C(Algorithm):
 
     @jaxtyped(typechecker=beartype)
     def make_agent(
-        self, key, env, config: A2CAgentConfig, transformations=None
+        self,
+        key,
+        observation_space,
+        action_space,
+        config: A2CAgentConfig,
+        transformations=None,
     ) -> A2CAgent:
         key, subkey = jax.random.split(key)
         obs_interpreter = ObservationInterpreter(
-            subkey, env.observation_space(), transformations=transformations
+            subkey, observation_space, transformations=transformations
         )
-        act_interpreter = ActionInterpreter(env.action_space())
+        act_interpreter = ActionInterpreter(action_space)
 
         out_features = obs_interpreter.out_features
         obs_shape = jax.ShapeDtypeStruct((out_features,), jnp.float32)

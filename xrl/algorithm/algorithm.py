@@ -4,17 +4,16 @@ from jaxtyping import Array, Bool, Float, Key, PyTree, jaxtyped
 
 from xrl.networks import ObservationTransformation
 
-from ..environment import Action, EnvInfo, MonoEnv, Observation
+from ..environment import Action, EnvInfo, Observation, Space
 
 
-@jaxtyped(typechecker=beartype)
 class Transition(eqx.Module):
-    observation: Observation
-    action: Action
-    reward: Float[Array, ""]
-    terminated: Bool[Array, ""]
-    truncated: Bool[Array, ""]
-    info: EnvInfo
+    observation: PyTree[Observation]
+    action: PyTree[Action]
+    reward: PyTree[Float[Array, ""]]
+    terminated: PyTree[Bool[Array, ""]]
+    truncated: PyTree[Bool[Array, ""]]
+    info: PyTree[EnvInfo]
 
 
 @jaxtyped(typechecker=beartype)
@@ -22,7 +21,8 @@ class Algorithm[Agent, AgentConfig: eqx.Module](eqx.Module):
     def make_agent(
         self,
         key: Key[Array, ""],
-        env: MonoEnv,
+        observation_space: PyTree[Space],
+        action_space: PyTree[Space],
         config: AgentConfig,
         transformations: PyTree[type[ObservationTransformation]] | None = None,
     ) -> Agent:

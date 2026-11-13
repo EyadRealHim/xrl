@@ -17,10 +17,12 @@ from rich.progress import (
     track,
 )
 
+from xrl.tree import keys_like, prefix
+
 from .networks import ObservationTransformation
 
 from .algorithm.algorithm import Algorithm, Transition
-from .environment import MonoEnv, Observation, PolyEnv
+from .environment import TERMINAL_OBSERVATION, MonoEnv, Observation, PolyEnv
 
 
 @jaxtyped(typechecker=beartype)
@@ -43,11 +45,34 @@ class Trainer[EnvState, Agent, AgentConfig: eqx.Module](eqx.Module):
     def make_agent(
         self,
         key: Key[Array, ""],
-        env: MonoEnv,
+        env: MonoEnv | PolyEnv,
         config: AgentConfig,
         transformations: PyTree[type[ObservationTransformation]] | None = None,
     ) -> Agent:
-        return self.algo.make_agent(key, env, config, transformations)
+        if isinstance(env, MonoEnv):
+            return self.algo.make_agent(
+                key,
+                env.observation_space(),
+                env.action_space(),
+                config,
+                transformations,
+            )
+
+        structure = prefix(env.observation_space())
+        keys = keys_like(key, structure)
+
+        return jax.tree.map(
+            lambda key, obs, act: self.algo.make_agent(
+                key,
+                obs,
+                act,
+                config,
+                transformations,
+            ),
+            keys,
+            env.observation_space(),
+            env.action_space(),
+        )
 
     @jaxtyped(typechecker=beartype)
     def train(
@@ -110,7 +135,34 @@ class Trainer[EnvState, Agent, AgentConfig: eqx.Module](eqx.Module):
             rs, transitions = eqx.filter_vmap(self.rollout, in_axes=(0, None))(
                 rs, agent
             )
-            agent = self.algo.train(agent, transitions)
+
+            transitions = {
+                idx: Transition(
+                    observation=transitions.observation[idx],
+                    action=transitions.action[idx],
+                    reward=transitions.reward[idx],
+                    terminated=transitions.terminated,
+                    truncated=transitions.truncated,
+                    info={
+                        **transitions.info,
+                        TERMINAL_OBSERVATION: transitions.info[TERMINAL_OBSERVATION][
+                            idx
+                        ],
+                    },
+                )
+                for idx in transitions.observation
+            }
+            agent = jax.tree.map(
+                lambda _, agent, transitions: self.algo.train(agent, transitions),
+                keys_like(  # TODO: we dont really need the keys its just for mapping.
+                    jax.random.key(0),
+                    jax.tree.structure(0)
+                    if isinstance(self.env, MonoEnv)
+                    else prefix(agent),
+                ),
+                agent,
+                transitions,
+            )
 
             params = eqx.filter(agent, eqx.is_array)
 
@@ -126,7 +178,17 @@ class Trainer[EnvState, Agent, AgentConfig: eqx.Module](eqx.Module):
         @jaxtyped(typechecker=beartype)
         def step(rs: RolloutState[EnvState], _):
             key, actionk = jax.random.split(rs.key)
-            action = self.algo.act(actionk, agent, rs.obs)
+            action = jax.tree.map(
+                lambda key, agent, obs: self.algo.act(key, agent, obs),
+                keys_like(
+                    actionk,
+                    jax.tree.structure(0)
+                    if isinstance(self.env, MonoEnv)
+                    else prefix(agent),
+                ),
+                agent,
+                rs.obs,
+            )
 
             key, step_key = jax.random.split(key)
 
@@ -150,7 +212,17 @@ class Trainer[EnvState, Agent, AgentConfig: eqx.Module](eqx.Module):
         @jaxtyped(typechecker=beartype)
         def step(rs: RolloutState[EnvState], _):
             key, actionk = jax.random.split(rs.key)
-            action = self.algo.act(actionk, agent, rs.obs)
+            action = jax.tree.map(
+                lambda key, agent, obs: self.algo.act(key, agent, obs),
+                keys_like(
+                    actionk,
+                    jax.tree.structure(0)
+                    if isinstance(self.env, MonoEnv)
+                    else prefix(agent),
+                ),
+                agent,
+                rs.obs,
+            )
 
             key, step_key = jax.random.split(key)
 
