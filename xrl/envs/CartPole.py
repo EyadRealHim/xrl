@@ -155,7 +155,6 @@ class CartPoleEnv(MonoEnv[CartPoleState]):
         screen_width = 600
         screen_height = 400
 
-        # Canvas and scaling
         img = jg.new_canvas(screen_height, screen_width, "#ffffff")
 
         world_width = self.x_threshold * 2
@@ -167,68 +166,24 @@ class CartPoleEnv(MonoEnv[CartPoleState]):
         cartwidth = 50.0
         cartheight = 30.0
 
-        # Cart position
         cartx = state.x * scale + screen_width / 2.0
+        carty = screen_height - 1.0 - 100.0  # y is down
 
-        # Account for the vertical flip in the original PIL renderer
-        carty = screen_height - 1.0 - 100.0
-
-        # Track
+        # Track and cart
         img = jg.fill(
-            img,
-            jg.box(
-                center=(screen_width / 2.0, carty),
-                size=(screen_width, 2.0),
-            ),
-            "#000000",
+            img, jg.Box((screen_width / 2.0, carty), (screen_width, 2.0)), "#000000"
         )
+        img = jg.fill(img, jg.Box((cartx, carty), (cartwidth, cartheight)), "#000000")
 
-        # Cart
+        # Pole: pivots about the axle, which sits a quarter cart-height above the track
+        axle_y = carty - cartheight / 4.0
+        offset = polelen / 2.0 - polewidth / 2.0
+        sin_t, cos_t = jnp.sin(state.theta), jnp.cos(state.theta)
+        pole_center = (cartx + offset * sin_t, axle_y - offset * cos_t)
+
         img = jg.fill(
-            img,
-            jg.box(
-                center=(cartx, carty),
-                size=(cartwidth, cartheight),
-            ),
-            "#000000",
+            img, jg.Box(pole_center, (polewidth, polelen), angle=state.theta), "#ca9865"
         )
+        img = jg.fill(img, jg.Circle((cartx, axle_y), polewidth / 2.0), "#8184cb")
 
-        # Pole geometry
-        axleoffset = cartheight / 4.0
-        axle_y = carty - axleoffset
-
-        # Original PIL pole bounds:
-        # y ranges from -polewidth/2 to polelen - polewidth/2
-        pole_center_offset = polelen / 2.0 - polewidth / 2.0
-
-        # Pole center after rotation and vertical flip
-        sin_theta = jnp.sin(state.theta)
-        cos_theta = jnp.cos(state.theta)
-
-        pole_center = (
-            cartx + pole_center_offset * sin_theta,
-            axle_y - pole_center_offset * cos_theta,
-        )
-
-        # Pole
-        img = jg.fill(
-            img,
-            jg.box(
-                center=pole_center,
-                size=(polewidth, polelen),
-                angle=state.theta,
-            ),
-            "#ca9865",
-        )
-
-        # Axle
-        img = jg.fill(
-            img,
-            jg.circle(
-                center=(cartx, axle_y),
-                radius=polewidth / 2.0,
-            ),
-            "#8184cb",
-        )
-
-        return (img * 255).astype(jnp.uint8)
+        return jg.to_uint8(img).transpose((1, 2, 0))

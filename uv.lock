@@ -251,14 +251,14 @@ wheels = [
 
 [[package]]
 name = "jaxgraphic"
-version = "0.1.1"
+version = "0.2.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "jax" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/0c/4e/12f171607d8bfe70eaadfd87a1ecc5b7ee90b0e9e64fe51813a60a38d441/jaxgraphic-0.1.1.tar.gz", hash = "sha256:7cfce9b02269db8a1ef6cd586a3acb5a8d7ce97fb00cbfb59b793a9d261aae3d", size = 29316, upload-time = "2026-11-03T15:54:16.051Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/c4/bf/091d0cd5db217f162484ee414adb90af99bd1597ead85e41d0ba607c9254/jaxgraphic-0.2.0.tar.gz", hash = "sha256:00f2dcf08b5921db0a6fd15b1e8387821c56a4cceda226b5893f32adc049a63f", size = 55468, upload-time = "2026-11-13T11:00:40.6Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/1d/b1/6fb66f66818314dbb9585e9e3e6263a552d9567fcec9c433415e7db72f18/jaxgraphic-0.1.1-py3-none-any.whl", hash = "sha256:ff5e1eac7f32c1e600764da418820bffaf29784ba2d48889e70072c23fbaac90", size = 12859, upload-time = "2026-11-03T15:54:14.703Z" },
+    { url = "https://files.pythonhosted.org/packages/40/8c/9547a16f7702e349da576049ef61eecaad8448077f13a8b7c99ee271f7dd/jaxgraphic-0.2.0-py3-none-any.whl", hash = "sha256:b340496426b3370e445f075786b1144b73cff9ac56c99c0d2bb808d6ddb3e9e9", size = 38841, upload-time = "2026-11-13T11:00:38.741Z" },
 ]
 
 [[package]]
@@ -410,14 +410,14 @@ wheels = [
 
 [[package]]
 name = "markdown-it-py"
-version = "4.2.0"
+version = "4.3.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "mdurl" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/06/ff/7841249c247aa650a76b9ee4bbaeae59370dc8bfd2f6c01f3630c35eb134/markdown_it_py-4.2.0.tar.gz", hash = "sha256:04a21681d6fbb623de53f6f364d352309d4094dd4194040a10fd51833e418d49", size = 82454, upload-time = "2026-05-07T12:08:28.36Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/16/fc/cee2c45553c9a9bf77d8b0c391560c556d7ed756b1f0bb35eb5d48db09ea/markdown_it_py-4.3.0.tar.gz", hash = "sha256:91a58fa5b72c71a40cf7177250fd767480d7a2bb3ac426ccfb76fb90305fdaaa", size = 242701, upload-time = "2026-11-10T16:18:30.467Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/b3/81/4da04ced5a082363ecfa159c010d200ecbd959ae410c10c0264a38cac0f5/markdown_it_py-4.2.0-py3-none-any.whl", hash = "sha256:9f7ebbcd14fe59494226453aed97c1070d83f8d24b6fc3a3bcf9a38092641c4a", size = 91687, upload-time = "2026-05-07T12:08:27.182Z" },
+    { url = "https://files.pythonhosted.org/packages/c9/31/5f0ac2f1a1c67423c995c731a11cd4ad05d081a2be969d74f868bdb9cc70/markdown_it_py-4.3.0-py3-none-any.whl", hash = "sha256:7aa1511a46c39138de78d9eba92ce47e63124d8003fc98b3a351909e04239efa", size = 96951, upload-time = "2026-11-10T16:18:28.975Z" },
 ]
 
 [[package]]
@@ -617,7 +617,7 @@ wheels = [
 
 [[package]]
 name = "optax"
-version = "0.2.8"
+version = "0.2.9"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "absl-py" },
@@ -625,9 +625,9 @@ dependencies = [
     { name = "jaxlib" },
     { name = "numpy" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/8c/f9/e3d11ae6f298ee941a0690e353a323d158ba5dedc436e75621c310845c5c/optax-0.2.8.tar.gz", hash = "sha256:5b225b35066fc3eebaa4d798f1b4173b4d57d1a480610908981f8343b50af0b0", size = 301193, upload-time = "2026-03-20T23:30:05.465Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/b1/45/103ec6ed4594cf8dec67e29ef3f72bb5530a86db4e28a354110e8fc8425b/optax-0.2.9.tar.gz", hash = "sha256:fcaa7e34c37ab2875c72d91e55374ff02a7ef6463b79fdb45bd3d65c6d4d61c5", size = 314052, upload-time = "2026-11-11T18:36:36.667Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/8a/69/6a93d8600c339d7687a05857c7907bd4dd8cf88691a5ea106d7a50af90a1/optax-0.2.8-py3-none-any.whl", hash = "sha256:e3ca2d36c99daab1800ae9dbc0545034382d6bc780b24d969e1b0df65fa31cb4", size = 402960, upload-time = "2026-03-20T23:30:03.886Z" },
+    { url = "https://files.pythonhosted.org/packages/07/18/3ebc9263daccd4c41a5d90785f467eb24d450355f8c7089906d154677797/optax-0.2.9-py3-none-any.whl", hash = "sha256:ec037b3975685e2550f9cc4994feda1492162ff9b812a0ea5face18c8fdf2948", size = 416967, upload-time = "2026-11-11T18:36:35.084Z" },
 ]
 
 [[package]]
@@ -743,7 +743,7 @@ wheels = [
 
 [[package]]
 name = "tfp-nightly"
-version = "0.26.0.dev20261109"
+version = "0.26.0.dev20261113"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "absl-py" },
@@ -755,7 +755,7 @@ dependencies = [
     { name = "six" },
 ]
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/11/38/b1c8cad67bcaaf81324debf631cd0cc65d32df32f9a28db2eec21cd5ea44/tfp_nightly-0.26.0.dev20261109-py2.py3-none-any.whl", hash = "sha256:e30e873b99536b2f56df1b9e75acbabb942c6cd6289787145b9ff98f36805254", size = 6976944, upload-time = "2026-11-09T08:41:41.526Z" },
+    { url = "https://files.pythonhosted.org/packages/cf/d8/e1eab5354c3c59206e8b2a3987474b5e96b3d791f79affc7128c009f37a0/tfp_nightly-0.26.0.dev20261113-py2.py3-none-any.whl", hash = "sha256:dc3a4fbad607d49cfa6deeec8eb3eecb1dd3f5ac31545683632f488630d7d3e9", size = 6976944, upload-time = "2026-11-13T08:41:24.939Z" },
 ]
 
 [[package]]
@@ -888,7 +888,7 @@ requires-dist = [
     { name = "distrax", specifier = ">=0.1.9" },
     { name = "equinox", specifier = ">=0.13.8" },
     { name = "jax", specifier = ">=0.12.0" },
-    { name = "jaxgraphic", specifier = "==0.1.1" },
+    { name = "jaxgraphic", specifier = ">=0.2.0" },
     { name = "jaxtyping", specifier = ">=0.3.11" },
     { name = "optax", specifier = ">=0.2.8" },
     { name = "rich", specifier = ">=15.0.0" },
