@@ -88,7 +88,7 @@ class Box(Space):
 
         object.__setattr__(self, "low", low)
         object.__setattr__(self, "high", high)
-        object.__setattr__(self, "shape", shape)
+        object.__setattr__(self, "shape", tuple(shape))
         object.__setattr__(self, "dtype", jnp.float32)
 
 

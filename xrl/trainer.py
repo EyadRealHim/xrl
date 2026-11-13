@@ -177,7 +177,7 @@ class Trainer[EnvState, Agent, AgentConfig: eqx.Module](eqx.Module):
     ):
         states, mask = states_and_mask
         frames = jax.lax.map(eqx.filter_jit(self.env.render), states, batch_size=32)
-        idx = int(jax.numpy.argmax(mask)) if mask.any() else len(mask)
+        idx = int(jax.numpy.argmax(mask) + 1) if mask.any() else len(mask)
 
         container = av.open(str(filename), mode="w")
         stream = container.add_stream("libx264", rate=fps)
