@@ -43,6 +43,4 @@ agent = trainer.make_agent(
 
 agent, _ = trainer.train(key, agent, 64 * 3)
 
-trainer.record("test1.mp4", trainer.episode(jax.random.key(3), agent, step_n=256))
-trainer.record("test2.mp4", trainer.episode(jax.random.key(4), agent, step_n=256))
-trainer.record("test3.mp4", trainer.episode(jax.random.key(5), agent, step_n=256))
+trainer.record("test.mp4", trainer.episode(jax.random.key(76), agent, step_n=256))

@@ -4,7 +4,7 @@ import jax.numpy as jnp
 import jaxgraphic as jg  # type: ignore[import-untyped]
 import numpy as np
 from beartype import beartype
-from jaxtyping import Array, Float, jaxtyped
+from jaxtyping import Array, Float, Int, jaxtyped
 
 from ..environment import Box, Discrete, PolyEnv, PolyTimeStep
 
@@ -14,6 +14,7 @@ class PongState(eqx.Module):
     ys: Float[Array, "2"]
     ball_velocity: Float[Array, "2"]
     ball_position: Float[Array, "2"]
+    steps: Int[Array, ""]
 
 
 class PongEnv(PolyEnv):
@@ -27,6 +28,8 @@ class PongEnv(PolyEnv):
     ball_speed: float = 10.0
 
     paddle_speed: float = 20.0
+
+    max_episode_steps: int = 1000
 
     xoff: int = 20
 
@@ -88,12 +91,14 @@ class PongEnv(PolyEnv):
         def reward(y):
             return 1 - jnp.abs(bp[1] - y) / self.height
 
-        state = PongState(ys=ys, ball_velocity=v, ball_position=bp)
+        state = PongState(
+            ys=ys, ball_velocity=v, ball_position=bp, steps=state.steps + 1
+        )
         timestep = PolyTimeStep(
             reward={"left": reward(ys[0]), "right": reward(ys[1])},
             inactive={"left": jnp.array(False), "right": jnp.array(False)},
             terminated=jnp.logical_or(left_score > 0, right_score > 0),
-            truncated=jnp.logical_or(left_score > 0, right_score > 0),
+            truncated=state.steps >= self.max_episode_steps,
         )
 
         return state, timestep, self.get_obs(state), {}
@@ -112,6 +117,7 @@ class PongEnv(PolyEnv):
             ball_position=jnp.array(
                 [self.width / 2, self.height / 2], dtype=jnp.float32
             ),
+            steps=jnp.array(0),
         )
 
         return state, self.get_obs(state)
@@ -139,17 +145,19 @@ class PongEnv(PolyEnv):
         }
 
     def get_obs(self, state: PongState):
+        ys = state.ys / self.height * 2.0 - 1.0
+        ball = state.ball_position / jnp.array([self.width, self.height]) * 2.0 - 1.0
         return {
             "left": {
-                "other": jnp.atleast_1d(state.ys[1]),
-                "self": jnp.atleast_1d(state.ys[0]),
-                "ball": state.ball_position,
+                "other": ys[1:2],
+                "self": ys[0:1],
+                "ball": ball,
                 "ball_velocity": state.ball_velocity,
             },
             "right": {
-                "other": jnp.atleast_1d(state.ys[0]),
-                "self": jnp.atleast_1d(state.ys[1]),
-                "ball": state.ball_position,
+                "other": ys[0:1],
+                "self": ys[1:2],
+                "ball": ball,
                 "ball_velocity": state.ball_velocity,
             },
         }

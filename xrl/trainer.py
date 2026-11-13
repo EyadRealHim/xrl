@@ -258,22 +258,40 @@ class Trainer[EnvState, Agent, AgentConfig: eqx.Module](eqx.Module):
         filename: Path | str,
         states_and_mask: tuple[EnvState, Bool[Array, " step_n"]],
         fps: int = 30,
+        chunk_size: int = 32,
     ):
         states, mask = states_and_mask
-        frames = jax.lax.map(eqx.filter_jit(self.env.render), states, batch_size=32)
-        idx = int(jax.numpy.argmax(mask) + 1) if mask.any() else len(mask)
+
+        idx = int(jnp.argmax(mask)) + 1 if bool(mask.any()) else int(mask.shape[0])
+        states = jax.tree.map(lambda x: x[:idx], states)
+
+        render = eqx.filter_jit(eqx.filter_vmap(self.env.render))
+
+        def chunks():
+            for start in range(0, idx, chunk_size):
+                chunk = jax.tree.map(lambda x: x[start : start + chunk_size], states)  # noqa: B023
+                yield np.asarray(render(chunk))
 
         container = av.open(str(filename), mode="w")
-        stream = container.add_stream("libx264", rate=fps)
-        _, stream.height, stream.width, _ = frames.shape
-        stream.pix_fmt = "yuv420p"
+        try:
+            stream = container.add_stream("libx264", rate=fps)
+            stream.pix_fmt = "yuv420p"
+            configured = False
 
-        for frame in track(list(frames)[:idx], description="Writing video"):
-            frame = av.VideoFrame.from_ndarray(np.array(frame), format="rgb24")
-            for packet in stream.encode(frame):
+            for start, frames in zip(
+                track(range(0, idx, chunk_size), description="Writing video"),
+                chunks(),
+            ):
+                if not configured:
+                    _, stream.height, stream.width, _ = frames.shape
+                    configured = True
+
+                for frame in frames:
+                    video_frame = av.VideoFrame.from_ndarray(frame, format="rgb24")
+                    for packet in stream.encode(video_frame):
+                        container.mux(packet)
+
+            for packet in stream.encode():
                 container.mux(packet)
-
-        for packet in stream.encode():
-            container.mux(packet)
-
-        container.close()
+        finally:
+            container.close()
