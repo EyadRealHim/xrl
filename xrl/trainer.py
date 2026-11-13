@@ -19,10 +19,9 @@ from rich.progress import (
 
 from xrl.tree import keys_like, prefix
 
-from .networks import ObservationTransformation
-
 from .algorithm.algorithm import Algorithm, Transition
 from .environment import TERMINAL_OBSERVATION, MonoEnv, Observation, PolyEnv
+from .networks import ObservationTransformation
 
 
 @jaxtyped(typechecker=beartype)
@@ -136,22 +135,23 @@ class Trainer[EnvState, Agent, AgentConfig: eqx.Module](eqx.Module):
                 rs, agent
             )
 
-            transitions = {
-                idx: Transition(
-                    observation=transitions.observation[idx],
-                    action=transitions.action[idx],
-                    reward=transitions.reward[idx],
-                    terminated=transitions.terminated,
-                    truncated=transitions.truncated,
-                    info={
-                        **transitions.info,
-                        TERMINAL_OBSERVATION: transitions.info[TERMINAL_OBSERVATION][
-                            idx
-                        ],
-                    },
-                )
-                for idx in transitions.observation
-            }
+            if isinstance(self.env, PolyEnv):
+                transitions = {
+                    idx: Transition(
+                        observation=transitions.observation[idx],
+                        action=transitions.action[idx],
+                        reward=transitions.reward[idx],
+                        terminated=transitions.terminated,
+                        truncated=transitions.truncated,
+                        info={
+                            **transitions.info,
+                            TERMINAL_OBSERVATION: transitions.info[
+                                TERMINAL_OBSERVATION
+                            ][idx],
+                        },
+                    )
+                    for idx in transitions.observation
+                }
             agent = jax.tree.map(
                 lambda _, agent, transitions: self.algo.train(agent, transitions),
                 keys_like(  # TODO: we dont really need the keys its just for mapping.
