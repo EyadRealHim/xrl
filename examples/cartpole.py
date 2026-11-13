@@ -35,7 +35,7 @@ trainer = Trainer(algo, env)
 
 
 key, subk = jax.random.split(key)
-agent = algo.make_agent(
+agent = trainer.make_agent(
     subk,
     env,
     A2CAgentConfig(actor=CartPoleActor, critic=CartPoleCritic, optim=optax.adam(1e-3)),

@@ -19,7 +19,6 @@ class Transition(eqx.Module):
 
 @jaxtyped(typechecker=beartype)
 class Algorithm[Agent, AgentConfig: eqx.Module](eqx.Module):
-    @jaxtyped(typechecker=beartype)
     def make_agent(
         self,
         key: Key[Array, ""],
@@ -29,10 +28,8 @@ class Algorithm[Agent, AgentConfig: eqx.Module](eqx.Module):
     ) -> Agent:
         raise NotImplementedError()
 
-    @jaxtyped(typechecker=beartype)
     def act(self, key: Key[Array, ""], agent: Agent, obs: Observation) -> Action:
         raise NotImplementedError()
 
-    @jaxtyped(typechecker=beartype)
     def train(self, agent: Agent, transition: Transition) -> Agent:
         raise NotImplementedError()

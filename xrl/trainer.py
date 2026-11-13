@@ -6,7 +6,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 from beartype import beartype
-from jaxtyping import Array, Bool, Key, jaxtyped
+from jaxtyping import Array, Bool, Key, PyTree, jaxtyped
 from rich.console import Console
 from rich.progress import (
     BarColumn,
@@ -17,8 +17,10 @@ from rich.progress import (
     track,
 )
 
+from .networks import ObservationTransformation
+
 from .algorithm.algorithm import Algorithm, Transition
-from .environment import MonoEnv, Observation
+from .environment import MonoEnv, Observation, PolyEnv
 
 
 @jaxtyped(typechecker=beartype)
@@ -31,11 +33,21 @@ class RolloutState[EnvState](eqx.Module):
 @jaxtyped(typechecker=beartype)
 class Trainer[EnvState, Agent, AgentConfig: eqx.Module](eqx.Module):
     algo: Algorithm[Agent, AgentConfig] = eqx.field(static=True)
-    env: MonoEnv[EnvState] = eqx.field(static=True)
+    env: MonoEnv[EnvState] | PolyEnv[EnvState] = eqx.field(static=True)
 
     env_n: int = eqx.field(static=True, default=16)
     step_n: int = eqx.field(static=True, default=128)
     cycle_n: int = eqx.field(static=True, default=32)
+
+    @jaxtyped(typechecker=beartype)
+    def make_agent(
+        self,
+        key: Key[Array, ""],
+        env: MonoEnv,
+        config: AgentConfig,
+        transformations: PyTree[type[ObservationTransformation]] | None = None,
+    ) -> Agent:
+        return self.algo.make_agent(key, env, config, transformations)
 
     @jaxtyped(typechecker=beartype)
     def train(
