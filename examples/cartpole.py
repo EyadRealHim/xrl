@@ -2,7 +2,7 @@ import equinox as eqx
 import jax
 import optax  # type: ignore[import-untyped]
 
-from xrl.algorithm.A2C import A2C, A2CAgentConfig
+from xrl.algorithm.PPO import PPO, PPOAgentConfig
 from xrl.envs.CartPole import CartPoleEnv
 from xrl.networks import ActorLike, CriticLike
 from xrl.trainer import Trainer
@@ -30,7 +30,7 @@ class CartPoleActor(ActorLike):
 
 key = jax.random.key(5)
 env = CartPoleEnv()
-algo = A2C()
+algo = PPO()
 trainer = Trainer(algo, env)
 
 
@@ -38,7 +38,7 @@ key, subk = jax.random.split(key)
 agent = trainer.make_agent(
     subk,
     env,
-    A2CAgentConfig(actor=CartPoleActor, critic=CartPoleCritic, optim=optax.adam(1e-3)),
+    PPOAgentConfig(actor=CartPoleActor, critic=CartPoleCritic, optim=optax.adam(1e-3)),
 )
 
 key, subkey = jax.random.split(key)

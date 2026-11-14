@@ -6,7 +6,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 from beartype import beartype
-from jaxtyping import Array, Bool, Key, PyTree, jaxtyped
+from jaxtyping import Array, Key, PyTree, jaxtyped
 from rich.console import Console
 from rich.progress import (
     BarColumn,
@@ -206,9 +206,7 @@ class Trainer[EnvState, Agent, AgentConfig: eqx.Module](eqx.Module):
         return jax.lax.scan(step, rs, length=self.step_n)
 
     @jaxtyped(typechecker=beartype)
-    def episode(
-        self, key: Key[Array, ""], agent: Agent, step_n=128
-    ) -> tuple[EnvState, Bool[Array, " step_n"]]:
+    def episode(self, key: Key[Array, ""], agent: Agent, step_n=128) -> EnvState:
         @jaxtyped(typechecker=beartype)
         def step(rs: RolloutState[EnvState], _):
             key, actionk = jax.random.split(rs.key)
@@ -226,21 +224,17 @@ class Trainer[EnvState, Agent, AgentConfig: eqx.Module](eqx.Module):
 
             key, step_key = jax.random.split(key)
 
-            state, time, obsv, _info = self.env.step(step_key, rs.state, action)
+            state, _time, obsv, _info = self.env.autostep(step_key, rs.state, action)
 
-            return RolloutState(key=key, state=state, obs=obsv), (
-                state,
-                jax.numpy.logical_or(time.truncated, time.terminated),
-            )
+            return RolloutState(key=key, state=state, obs=obsv), state
 
         key, resetk = jax.random.split(key)
         istate, obs = self.env.reset(resetk)
 
-        _, (state, mask) = jax.lax.scan(
+        _, state = jax.lax.scan(
             jax.jit(step), RolloutState(key, istate, obs), length=step_n
         )
 
-        mask = jnp.concat((jnp.array([False]), mask))
         state = jax.tree.map(
             lambda a, b: jnp.concat(
                 (jnp.expand_dims(b, axis=0), a),
@@ -250,21 +244,17 @@ class Trainer[EnvState, Agent, AgentConfig: eqx.Module](eqx.Module):
             istate,
         )
 
-        return state, mask
+        return state
 
     @jaxtyped(typechecker=beartype)
     def record(
         self,
         filename: Path | str,
-        states_and_mask: tuple[EnvState, Bool[Array, " step_n"]],
+        states: EnvState,
         fps: int = 30,
         chunk_size: int = 32,
     ):
-        states, mask = states_and_mask
-
-        idx = int(jnp.argmax(mask)) + 1 if bool(mask.any()) else int(mask.shape[0])
-        states = jax.tree.map(lambda x: x[:idx], states)
-
+        idx = jax.tree.leaves(states)[0].shape[0]  # Is this safe? I have no idea :D
         render = eqx.filter_jit(eqx.filter_vmap(self.env.render))
 
         def chunks():

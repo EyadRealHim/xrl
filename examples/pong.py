@@ -2,7 +2,7 @@ import equinox as eqx
 import jax
 import optax  # type: ignore[import-untyped]
 
-from xrl.algorithm.A2C import A2C, A2CAgentConfig
+from xrl.algorithm.PPO import PPO, PPOAgentConfig
 from xrl.envs.Pong import PongEnv
 from xrl.networks import ActorLike, CriticLike
 from xrl.trainer import Trainer
@@ -30,7 +30,7 @@ class PongActor(ActorLike):
 
 key = jax.random.key(5)
 env = PongEnv()
-algo = A2C()
+algo = PPO()
 trainer = Trainer(algo, env)
 
 
@@ -38,9 +38,9 @@ key, subk = jax.random.split(key)
 agent = trainer.make_agent(
     subk,
     env,
-    A2CAgentConfig(actor=PongActor, critic=PongCritic, optim=optax.adam(1e-3)),
+    PPOAgentConfig(actor=PongActor, critic=PongCritic, optim=optax.adam(1e-3)),
 )
 
 agent, _ = trainer.train(key, agent, 64 * 3)
 
-trainer.record("test.mp4", trainer.episode(jax.random.key(76), agent, step_n=256))
+trainer.record("test.mp4", trainer.episode(jax.random.key(76), agent, step_n=256*8))

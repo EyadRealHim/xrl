@@ -1,184 +1,153 @@
+"""Two-player Pong for XRL, written as pure JAX (Ultra-compact, Double Speed)."""
+
 import equinox as eqx
 import jax
 import jax.numpy as jnp
-import jaxgraphic as jg  # type: ignore[import-untyped]
+import jaxgraphic as jg
 import numpy as np
 from beartype import beartype
 from jaxtyping import Array, Float, Int, jaxtyped
 
 from ..environment import Box, Discrete, PolyEnv, PolyTimeStep
 
+__all__ = ["PongEnv", "PongState"]
+
 
 @jaxtyped(typechecker=beartype)
 class PongState(eqx.Module):
     ys: Float[Array, "2"]
-    ball_velocity: Float[Array, "2"]
     ball_position: Float[Array, "2"]
+    ball_velocity: Float[Array, "2"]
     steps: Int[Array, ""]
 
 
 class PongEnv(PolyEnv):
     width: int = 800
     height: int = 600
-
-    paddle_height: float = 40.0
-    paddle_width: float = 10.0
-
-    ball_radius: float = 5.0
-    ball_speed: float = 10.0
-
+    xoff: int = 30
+    paddle_width: float = 12.0
+    paddle_height: float = 80.0
+    ball_radius: float = 8.0
     paddle_speed: float = 20.0
-
+    ball_speed: float = 20.0
     max_episode_steps: int = 1000
 
-    xoff: int = 20
+    def step(self, key, state: PongState, action):
+        hp, r = self.paddle_height / 2, self.ball_radius
+        move = jnp.stack([action["left"], action["right"]]).astype(jnp.float32) - 1.0
+        ys = jnp.clip(state.ys + move * self.paddle_speed, hp, self.height - hp)
 
-    def step(self, key, state, action):
-        ys = state.ys + self.paddle_speed * (
-            jnp.squeeze(jnp.array([action["left"], action["right"]])) - 1
+        bp, bv = state.ball_position + state.ball_velocity, state.ball_velocity
+
+        # Wall collisions
+        hit_y = (bp[1] - r <= 0.0) | (bp[1] + r >= self.height)
+        bp = bp.at[1].set(jnp.clip(bp[1], r, self.height - r))
+        bv = bv.at[1].set(jnp.where(hit_y, -bv[1], bv[1]))
+
+        # Paddle collisions
+        rx = jnp.array([self.xoff, self.width - self.xoff])
+        hit_x = (jnp.abs(bp[0] - rx) <= self.paddle_width / 2 + r) & (
+            (bv[0] < 0) == (jnp.arange(2) == 0)
         )
+        hit_y_pad = (bp[1] >= ys - hp) & (bp[1] <= ys + hp)
+        hit = jnp.any(hit_x & hit_y_pad)
+        bv = bv.at[0].set(jnp.where(hit, -bv[0] * 1.02, bv[0]))
 
-        ys = jnp.clip(ys, self.paddle_height, self.height - self.paddle_height)
-        norm = jnp.linalg.norm(state.ball_velocity)
-        v = state.ball_velocity / (norm + 1e-6)
+        # Scoring & Termination
+        scored = (bp[0] > self.width) | (bp[0] < 0.0)
+        rew = jnp.where(bp[0] > self.width, 1.0, jnp.where(bp[0] < 0.0, -1.0, 0.0))
 
-        bp = state.ball_position + v * self.ball_speed
-
-        upper = (
-            jnp.array([self.width, self.height], dtype=jnp.float32) - self.ball_radius
-        )
-        lower = jnp.full_like(upper, self.ball_radius)
-
-        # collsion left:
-        v = v.at[0].multiply(
-            jnp.where(
-                jnp.logical_and(
-                    bp[0] - self.ball_radius < self.xoff + self.paddle_width,
-                    jnp.abs(bp[1] - ys[0]) <= self.ball_radius + self.paddle_height,
-                ),
-                -1,
-                1,
-            )
-        )
-
-        # collsion right
-        v = v.at[0].multiply(
-            jnp.where(
-                jnp.logical_and(
-                    bp[0] + self.ball_radius
-                    > self.width - (self.xoff + self.paddle_width),
-                    jnp.abs(bp[1] - ys[1]) <= self.ball_radius + self.paddle_height,
-                ),
-                -1,
-                1,
-            )
-        )
-
-        # collsion walls:
-        v = v * jnp.where(upper < bp, -1, 1)
-        v = v * jnp.where(lower > bp, -1, 1)
-
-        # is it done?
-        left_score = jnp.where(upper[0] < bp[0], 1, 0)
-        right_score = jnp.where(lower[0] > bp[0], 1, 0)
-
-        bp = jnp.clip(
-            bp,
-            np.array([self.ball_radius] * 2),
-            np.array([self.width - self.ball_radius, self.height - self.ball_radius]),
-        )
-
-        def reward(y):
-            return 1 - jnp.abs(bp[1] - y) / self.height
-
-        state = PongState(
-            ys=ys, ball_velocity=v, ball_position=bp, steps=state.steps + 1
+        new_state = PongState(
+            ys=ys, ball_position=bp, ball_velocity=bv, steps=state.steps + 1
         )
         timestep = PolyTimeStep(
-            reward={"left": reward(ys[0]), "right": reward(ys[1])},
+            reward={"left": rew, "right": -rew},
             inactive={"left": jnp.array(False), "right": jnp.array(False)},
-            terminated=jnp.logical_or(left_score > 0, right_score > 0),
-            truncated=state.steps >= self.max_episode_steps,
+            terminated=scored,
+            truncated=new_state.steps >= self.max_episode_steps,
         )
-
-        return state, timestep, self.get_obs(state), {}
+        return (
+            new_state,
+            timestep,
+            self.get_obs(new_state),
+            {"ball_speed": jnp.linalg.norm(bv)},
+        )
 
     def reset(self, key):
-        posk, velk = jax.random.split(key)
+        pk, sk = jax.random.split(key)
+        hp = self.paddle_height / 2
+        ys = jax.random.uniform(pk, (2,), minval=hp, maxval=self.height - hp)
+        angle = jax.random.uniform(sk, (), minval=-0.3, maxval=0.3)
+        dir_sign = jnp.where(jax.random.bernoulli(sk), 1.0, -1.0)
+        initial_ball_vel = self.ball_speed * jnp.stack(
+            [dir_sign * jnp.cos(angle), jnp.sin(angle)]
+        )
+        initial_pos = jnp.array([self.width / 2, self.height / 2], dtype=jnp.float32)
+        initial_steps = jnp.array(0, jnp.int32)
 
         state = PongState(
-            ys=jax.random.uniform(
-                key=posk,
-                shape=(2,),
-                minval=self.paddle_height,
-                maxval=self.height - self.paddle_height,
-            ),
-            ball_velocity=jax.random.uniform(key=velk, shape=(2,)) * 2.0 - 1.0,
-            ball_position=jnp.array(
-                [self.width / 2, self.height / 2], dtype=jnp.float32
-            ),
-            steps=jnp.array(0),
+            ys=ys,
+            ball_position=initial_pos,
+            ball_velocity=initial_ball_vel,
+            steps=initial_steps,
         )
-
         return state, self.get_obs(state)
 
     def observation_space(self):
-        return {
-            "left": {
-                "self": Box(-1.0, 1.0, shape=(1,)),
-                "other": Box(-1.0, 1.0, shape=(1,)),
-                "ball": Box(-1.0, 1.0, shape=(2,)),
-                "ball_velocity": Box(-1.0, 1.0, shape=(2,)),
-            },
-            "right": {
-                "self": Box(-1.0, 1.0, shape=(1,)),
-                "other": Box(-1.0, 1.0, shape=(1,)),
-                "ball": Box(-1.0, 1.0, shape=(2,)),
-                "ball_velocity": Box(-1.0, 1.0, shape=(2,)),
-            },
+        p = {
+            "self": Box(-1.0, 1.0, (1,)),
+            "other": Box(-1.0, 1.0, (1,)),
+            "ball": Box(-1.0, 1.0, (2,)),
+            "ball_velocity": Box(-1.0, 1.0, (2,)),
         }
+        return {"left": p, "right": p}
 
     def action_space(self):
-        return {
-            "left": Discrete(3),
-            "right": Discrete(3),
-        }
+        return {"left": Discrete(3), "right": Discrete(3)}
 
     def get_obs(self, state: PongState):
         ys = state.ys / self.height * 2.0 - 1.0
         ball = state.ball_position / jnp.array([self.width, self.height]) * 2.0 - 1.0
-        return {
-            "left": {
-                "other": ys[1:2],
-                "self": ys[0:1],
-                "ball": ball,
-                "ball_velocity": state.ball_velocity,
-            },
-            "right": {
-                "other": ys[0:1],
-                "self": ys[1:2],
-                "ball": ball,
-                "ball_velocity": state.ball_velocity,
-            },
+        vel = state.ball_velocity / (self.ball_speed * 2.5)
+        m = jnp.array([-1.0, 1.0])
+        view = lambda i, f: {
+            "self": ys[i : i + 1],
+            "other": ys[1 - i : 2 - i],
+            "ball": jnp.clip(ball * (m if f else 1.0), -1.0, 1.0),
+            "ball_velocity": jnp.clip(vel * (m if f else 1.0), -1.0, 1.0),
         }
+        return {"left": view(0, False), "right": view(1, True)}
 
     def render(self, state: PongState):
-        pos = jnp.array(
-            [
-                [self.xoff, state.ys[0]],
-                [self.width - self.xoff, state.ys[1]],
-            ]
-        )
-        sizes = jnp.array([[self.paddle_width, self.paddle_height * 2]] * 2)
+        W, H, r = self.width, self.height, self.ball_radius
+        canvas = jg.Canvas.new(H, W, bg="#0b1226")
 
-        return jg.to_hwc(
-            jg.to_uint8(
-                jg.Canvas.new(self.height, self.width, bg="#214d21")
-                .fill_many(
-                    jg.Box(pos, sizes),
-                    colors=["#fff", "#fff"],
-                )
-                .fill(jg.Circle(state.ball_position, self.ball_radius), color="#fff")
-                .img
-            )
+        # Center net
+        n = 20
+        dy = (np.arange(n, dtype=np.float32) + 0.5) * (H / n)
+        canvas = canvas.fill_many(
+            jg.Box(
+                np.stack([np.full(n, W / 2, np.float32), dy], axis=1),
+                np.tile([4.0, H / (n * 2)], (n, 1)),
+            ),
+            colors=["#94a3b8"] * n,
+            alphas=0.3,
+            at=np.stack([np.full(n, W / 2, np.float32), dy], axis=1),
+            window=(10, int(H / n)),
         )
+
+        # Ball & Paddles
+        canvas = canvas.fill(jg.Circle(state.ball_position, r), color="#f8fafc")
+        for i, (x, col) in enumerate(
+            ((self.xoff, "#38bdf8"), (W - self.xoff, "#fb7185"))
+        ):
+            canvas = canvas.fill(
+                jg.Box(
+                    jnp.stack([jnp.float32(x), state.ys[i]]),
+                    (self.paddle_width, self.paddle_height),
+                    corner=self.paddle_width / 2,
+                ),
+                color=col,
+            )
+
+        return jg.to_hwc(jg.to_uint8(canvas.img))
