@@ -42,10 +42,6 @@ class PPOAgent(eqx.Module):
     optcritic: optax.OptState
     optactor: optax.OptState
 
-    # `Algorithm.train` receives no PRNG key, so the agent carries its own. It drives
-    # the minibatch shuffling (and the entropy estimate) and advances on every `train`.
-    # key: Key[Array, ""]
-
 
 @jaxtyped(typechecker=beartype)
 class PPOAgentConfig(eqx.Module):
@@ -82,7 +78,7 @@ class PPO(Algorithm):
     the behaviour log-probs are recomputed from the pre-update actor instead of being
     stored in `Transition`.
 
-    Actor and critic keep separate parameters and optimizer states, as in `A2C`.
+    Actor and critic keep separate parameters and optimizer states.
 
     Args:
         discount: Discount factor used for GAE.
