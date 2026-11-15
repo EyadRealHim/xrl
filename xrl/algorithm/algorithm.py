@@ -31,5 +31,5 @@ class Algorithm[Agent, AgentConfig: eqx.Module](eqx.Module):
     def act(self, key: Key[Array, ""], agent: Agent, obs: Observation) -> Action:
         raise NotImplementedError()
 
-    def train(self, agent: Agent, transition: Transition) -> Agent:
+    def train(self, key: Key[Array, ""], agent: Agent, transition: Transition) -> Agent:
         raise NotImplementedError()

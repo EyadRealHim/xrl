@@ -44,7 +44,7 @@ class PPOAgent(eqx.Module):
 
     # `Algorithm.train` receives no PRNG key, so the agent carries its own. It drives
     # the minibatch shuffling (and the entropy estimate) and advances on every `train`.
-    key: Key[Array, ""]
+    # key: Key[Array, ""]
 
 
 @jaxtyped(typechecker=beartype)
@@ -113,7 +113,7 @@ class PPO(Algorithm):
             raise ValueError(f"PPO `clip_eps` must be positive, got {self.clip_eps}.")
 
     @jaxtyped(typechecker=beartype)
-    def train(self, agent: PPOAgent, transition: Transition) -> PPOAgent:
+    def train(self, key, agent: PPOAgent, transition: Transition) -> PPOAgent:
         env_n, step_n = transition.reward.shape
         batch_n = env_n * step_n
 
@@ -226,8 +226,7 @@ class PPO(Algorithm):
 
             return jax.lax.scan(minibatch, state, (shuffled, keys))[0], None
 
-        key, epochk = jax.random.split(agent.key)
-        state, _ = jax.lax.scan(epoch, state, jax.random.split(epochk, self.epochs))
+        state, _ = jax.lax.scan(epoch, state, jax.random.split(key, self.epochs))
 
         actor, critic, optactor, optcritic = eqx.combine(state, static)
 
@@ -237,7 +236,6 @@ class PPO(Algorithm):
             critic=critic,
             optactor=optactor,
             optcritic=optcritic,
-            key=key,
         )
 
     @jaxtyped(typechecker=beartype)
@@ -249,7 +247,7 @@ class PPO(Algorithm):
         config: PPOAgentConfig,
         transformations=None,
     ) -> PPOAgent:
-        obsk, actork, logitsk, critick, valuek, agentk = jax.random.split(key, 6)
+        obsk, actork, logitsk, critick, valuek = jax.random.split(key, 5)
 
         obs_interpreter = ObservationInterpreter(
             obsk, observation_space, transformations=transformations
@@ -295,7 +293,6 @@ class PPO(Algorithm):
             actor=pi,
             optcritic=config.optim.init(eqx.filter(v, eqx.is_inexact_array)),
             optactor=config.optim.init(eqx.filter(pi, eqx.is_inexact_array)),
-            key=agentk,
         )
 
     @jaxtyped(typechecker=beartype)

@@ -79,7 +79,7 @@ def estimate_advantage_and_returns(
 
 class A2C(Algorithm):
     @jaxtyped(typechecker=beartype)
-    def train(self, agent: A2CAgent, transition: Transition):
+    def train(self, _key, agent: A2CAgent, transition: Transition):
         @jaxtyped(typechecker=beartype)
         def critic_forward(critic: A2CAgentCritic):
             network = jax.vmap(self.__value, in_axes=(None, 0))

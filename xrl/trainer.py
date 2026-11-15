@@ -152,10 +152,15 @@ class Trainer[EnvState, Agent, AgentConfig: eqx.Module](eqx.Module):
                     )
                     for idx in transitions.observation
                 }
+
+            key, traink = jnp.unstack(jax.vmap(jax.random.split)(rs.key), axis=-1)
+            traink = jnp.atleast_1d(traink)[0]
             agent = jax.tree.map(
-                lambda _, agent, transitions: self.algo.train(agent, transitions),
-                keys_like(  # TODO: we dont really need the keys its just for mapping.
-                    jax.random.key(0),
+                lambda key, agent, transitions: self.algo.train(
+                    key, agent, transitions
+                ),
+                keys_like(
+                    traink,
                     jax.tree.structure(0)
                     if isinstance(self.env, MonoEnv)
                     else prefix(agent),
@@ -166,7 +171,7 @@ class Trainer[EnvState, Agent, AgentConfig: eqx.Module](eqx.Module):
 
             params = eqx.filter(agent, eqx.is_array)
 
-            return rs, params
+            return RolloutState(key=key, state=rs.state, obs=rs.obs), params
 
         rs, params = jax.lax.fori_loop(0, self.cycle_n, body, (rs, params))
         agent = eqx.combine(params, static)
