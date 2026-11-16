@@ -63,8 +63,8 @@ class Flatten(ObservationTransformation):
 
 
 class ObservationInterpreter(eqx.Module):
-    spaces: PyTree[Space] = eqx.field(static=True)
     out_features: int = eqx.field(static=True)
+    spaces: PyTree[Space]
 
     transformations: PyTree[ObservationTransformation]
 
@@ -211,13 +211,20 @@ class ActionInterpreter(eqx.Module):
                     reinterpreted_batch_ndims=len(space.shape),
                 )
 
-                scale = (space.high - space.low) / 2
-                bias = (space.high + space.low) / 2
+                # Per-dimension bounds
+                low = jnp.asarray(space.low, dtype=mean.dtype)
+                high = jnp.asarray(space.high, dtype=mean.dtype)
+
+                scale = (high - low) / 2.0
+                bias = (high + low) / 2.0
 
                 transform = distrax.Chain(
                     [
                         distrax.Block(
-                            distrax.ScalarAffine(shift=bias, scale=scale),
+                            distrax.ScalarAffine(
+                                shift=bias,
+                                scale=scale,
+                            ),
                             ndims=len(space.shape),
                         ),
                         distrax.Block(

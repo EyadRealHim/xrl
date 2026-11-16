@@ -4,7 +4,17 @@ import equinox as eqx
 import jax
 import jax.numpy as jnp
 from beartype import beartype
-from jaxtyping import Array, Bool, DTypeLike, Float, Int, Key, PyTree, UInt8, jaxtyped
+from jaxtyping import (
+    Array,
+    Bool,
+    DTypeLike,
+    Float,
+    Int,
+    Key,
+    PyTree,
+    UInt8,
+    jaxtyped,
+)
 
 
 class Space(eqx.Module):
@@ -62,33 +72,44 @@ class MultiDiscrete(Space):
 
 
 class Box(Space):
-    """A continuous space defined by lower and upper bounds."""
+    """A continuous space defined by element-wise lower and upper bounds."""
 
-    low: float
-    high: float
+    low: jax.Array
+    high: jax.Array
 
     @jaxtyped(typechecker=beartype)
     def __init__(
         self,
-        low: float,
-        high: float,
-        shape: Sequence[int],
+        low: float | Float[Array, "*shape"],
+        high: float | Float[Array, "*shape"],
+        shape: tuple[int, ...],
     ):
-        """Initializes a Box space.
-
+        """
         Args:
-            low: Lower bound scalar.
-            high: Upper bound scalar.
+            low: Scalar or array of lower bounds.
+            high: Scalar or array of upper bounds.
             shape: Shape of the box space.
         """
-        if low > high:
-            raise ValueError(
-                f"Box 'low' must be less than or equal to 'high'. Got low={low}, high={high}."
-            )
+        shape = tuple(shape)
+
+        low = jnp.asarray(low, dtype=jnp.float32)
+        high = jnp.asarray(high, dtype=jnp.float32)
+
+        try:
+            low = jnp.broadcast_to(low, shape)
+            high = jnp.broadcast_to(high, shape)
+        except ValueError as exc:
+            raise ValueError(f"Bounds must be broadcastable to shape {shape}.") from exc
+
+        if bool(jnp.any(low > high)):
+            raise ValueError("Every element of low must be <= its corresponding high.")
+
+        low = jax.lax.stop_gradient(low)
+        high = jax.lax.stop_gradient(high)
 
         object.__setattr__(self, "low", low)
         object.__setattr__(self, "high", high)
-        object.__setattr__(self, "shape", tuple(shape))
+        object.__setattr__(self, "shape", shape)
         object.__setattr__(self, "dtype", jnp.float32)
 
 

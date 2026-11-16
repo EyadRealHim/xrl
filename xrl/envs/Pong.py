@@ -3,7 +3,7 @@
 import equinox as eqx
 import jax
 import jax.numpy as jnp
-import jaxgraphic as jg
+import jaxgraphic as jg  # type: ignore[import-untyped]
 import numpy as np
 from beartype import beartype
 from jaxtyping import Array, Float, Int, jaxtyped
@@ -60,7 +60,7 @@ class PongEnv(PolyEnv):
         new_state = PongState(
             ys=ys, ball_position=bp, ball_velocity=bv, steps=state.steps + 1
         )
-        timestep = PolyTimeStep(
+        timestep: PolyTimeStep = PolyTimeStep(
             reward={"left": rew, "right": -rew},
             inactive={"left": jnp.array(False), "right": jnp.array(False)},
             terminated=scored,
