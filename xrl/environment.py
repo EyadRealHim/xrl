@@ -171,7 +171,7 @@ class MonoEnv[TState](eqx.Module):
 @jaxtyped(typechecker=beartype)
 class PolyTimeStep[T](eqx.Module):
     reward: PyTree[Float[Array, ""], "T"]
-    inactive: PyTree[Bool[Array, ""], "T"]
+    online: PyTree[Bool[Array, ""], "T"]
     terminated: Bool[Array, ""]
     truncated: Bool[Array, ""]
 

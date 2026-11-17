@@ -62,7 +62,7 @@ class PongEnv(PolyEnv):
         )
         timestep: PolyTimeStep = PolyTimeStep(
             reward={"left": rew, "right": -rew},
-            inactive={"left": jnp.array(False), "right": jnp.array(False)},
+            online={"left": jnp.array(True), "right": jnp.array(True)},
             terminated=scored,
             truncated=new_state.steps >= self.max_episode_steps,
         )

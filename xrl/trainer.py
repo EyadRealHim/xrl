@@ -20,7 +20,13 @@ from rich.progress import (
 from xrl.tree import keys_like, prefix
 
 from .algorithm.algorithm import Algorithm, Transition
-from .environment import TERMINAL_OBSERVATION, MonoEnv, Observation, PolyEnv
+from .environment import (
+    TERMINAL_OBSERVATION,
+    MonoEnv,
+    Observation,
+    PolyEnv,
+    PolyTimeStep,
+)
 from .networks import ObservationTransformation
 
 
@@ -141,6 +147,7 @@ class Trainer[EnvState, Agent, AgentConfig: eqx.Module](eqx.Module):
                         observation=transitions.observation[idx],
                         action=transitions.action[idx],
                         reward=transitions.reward[idx],
+                        online=transitions.online[idx],
                         terminated=transitions.terminated,
                         truncated=transitions.truncated,
                         info={
@@ -155,10 +162,28 @@ class Trainer[EnvState, Agent, AgentConfig: eqx.Module](eqx.Module):
 
             key, traink = jnp.unstack(jax.vmap(jax.random.split)(rs.key), axis=-1)
             traink = jnp.atleast_1d(traink)[0]
+
+            def train_one(key, agent, transitions):
+                params, static = eqx.partition(agent, eqx.is_array)
+
+                def update(params):
+                    model = eqx.combine(params, static)
+
+                    updated_model = self.algo.train(key, model, transitions)
+
+                    return eqx.filter(updated_model, eqx.is_array)
+
+                params = jax.lax.cond(
+                    jnp.any(transitions.online),  # train if at least one online sample
+                    update,
+                    lambda params: params,
+                    params,
+                )
+
+                return eqx.combine(params, static)
+
             agent = jax.tree.map(
-                lambda key, agent, transitions: self.algo.train(
-                    key, agent, transitions
-                ),
+                train_one,
                 keys_like(
                     traink,
                     jax.tree.structure(0)
@@ -203,6 +228,9 @@ class Trainer[EnvState, Agent, AgentConfig: eqx.Module](eqx.Module):
                 observation=rs.obs,
                 action=action,
                 reward=time.reward,
+                online=time.online
+                if isinstance(time, PolyTimeStep)
+                else jnp.array(True),
                 truncated=time.truncated,
                 terminated=time.terminated,
                 info=info,

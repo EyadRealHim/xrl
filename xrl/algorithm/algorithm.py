@@ -7,12 +7,13 @@ from xrl.networks import ObservationTransformation
 from ..environment import Action, EnvInfo, Observation, Space
 
 
-class Transition(eqx.Module):
-    observation: PyTree[Observation]
-    action: PyTree[Action]
-    reward: PyTree[Float[Array, ""]]
-    terminated: PyTree[Bool[Array, ""]]
-    truncated: PyTree[Bool[Array, ""]]
+class Transition[T](eqx.Module):
+    observation: PyTree[Observation, "T"]
+    action: PyTree[Action, "T"]
+    reward: PyTree[Float[Array, ""], "T"]
+    online: PyTree[Bool[Array, ""], "T"]
+    terminated: Bool[Array, ""]
+    truncated: Bool[Array, ""]
     info: PyTree[EnvInfo]
 
 

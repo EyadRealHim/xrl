@@ -80,6 +80,9 @@ class PPO(Algorithm):
 
     Actor and critic keep separate parameters and optimizer states.
 
+    Only transitions flagged `online` (the agent was active) contribute to the
+    losses and to the advantage normalisation statistics.
+
     Args:
         discount: Discount factor used for GAE.
         lambda_: GAE lambda.
@@ -87,7 +90,8 @@ class PPO(Algorithm):
         epochs: Passes over each rollout.
         minibatches: Minibatches per pass; `env_n * step_n` must be divisible by it.
         ent_coef: Weight of the entropy bonus (`0.0` disables it).
-        normalize_advantage: Standardise advantages within each minibatch.
+        normalize_advantage: Standardise advantages over the online samples of each
+            minibatch.
     """
 
     discount: float = eqx.field(static=True, default=0.99)
@@ -122,6 +126,12 @@ class PPO(Algorithm):
         minibatch_n = batch_n // self.minibatches
         optim = agent.optim
 
+        # Train only on transitions where the agent was active. Shapes stay static
+        # for jit, so offline entries get zero weight instead of being indexed out.
+        def masked_mean(x, mask):
+            # An all-offline minibatch gives a zero loss rather than 0/0.
+            return jnp.where(mask, x, 0.0).sum() / jnp.maximum(mask.sum(), 1)
+
         # Advantages and the ratio's denominator both come from the pre-update agent.
         def values(obs: Observation):
             network = jax.vmap(self.__value, in_axes=(None, 0))
@@ -130,6 +140,11 @@ class PPO(Algorithm):
 
         value = values(transition.observation)
         next_value = values(transition.info[TERMINAL_OBSERVATION])
+
+        # An online step followed by an offline one must not inherit advantage from
+        # it: cut the GAE trace there so it bootstraps from V(next_obs) instead.
+        next_offline = jnp.pad(~transition.online[:, 1:], ((0, 0), (0, 1)))
+        truncated = transition.truncated | next_offline
 
         def gae(reward, value, next_value, terminated, truncated):
             return estimate_advantage_and_returns(
@@ -147,7 +162,7 @@ class PPO(Algorithm):
             value,
             next_value,
             transition.terminated,
-            transition.truncated,
+            truncated,
         )
 
         log_prob = jax.vmap(
@@ -155,34 +170,44 @@ class PPO(Algorithm):
         )
         old_log_p = log_prob(agent.actor, transition.observation, transition.action)
 
-        # (env_n, step_n, ...) -> (batch_n, ...); GAE above needed the time axis.
+        # (env_n, step_n, ...) -> (batch_n, ...); GAE above needed the time axis. The
+        # online mask travels with the samples through the shuffle below.
         batch = jax.tree.map(
             lambda x: x.reshape((batch_n,) + x.shape[2:]),
-            (transition.observation, transition.action, old_log_p, advantage, returns),
+            (
+                transition.observation,
+                transition.action,
+                old_log_p,
+                advantage,
+                returns,
+                transition.online,
+            ),
         )
 
-        def actor_loss(actor, obs, action, old_lp, adv, key):
+        def actor_loss(actor, obs, action, old_lp, adv, online, key):
             log_p = jax.vmap(self.__log_prob, in_axes=(None, 0, 0))(actor, obs, action)
 
             if self.normalize_advantage:
-                adv = (adv - adv.mean()) / (adv.std() + 1e-8)
+                mean = masked_mean(adv, online)
+                std = jnp.sqrt(masked_mean((adv - mean) ** 2, online))
+                adv = (adv - mean) / (std + 1e-8)
 
             ratio = jnp.exp(log_p - old_lp)
             clipped = jnp.clip(ratio, 1.0 - self.clip_eps, 1.0 + self.clip_eps)
-            loss = -jnp.minimum(ratio * adv, clipped * adv).mean()
+            loss = -masked_mean(jnp.minimum(ratio * adv, clipped * adv), online)
 
             if self.ent_coef != 0.0:
                 entropy = jax.vmap(self.__entropy, in_axes=(None, 0, 0))(
                     actor, obs, jax.random.split(key, minibatch_n)
                 )
-                loss = loss - self.ent_coef * entropy.mean()
+                loss = loss - self.ent_coef * masked_mean(entropy, online)
 
             return loss
 
-        def critic_loss(critic, obs, target):
+        def critic_loss(critic, obs, target, online):
             value = jax.vmap(self.__value, in_axes=(None, 0))(critic, obs).squeeze(-1)
 
-            return ((value - target) ** 2).mean()
+            return masked_mean((value - target) ** 2, online)
 
         # Only arrays travel through the scans; modules also hold non-array leaves
         # (activation functions and the like), which stay fixed in `static`.
@@ -192,15 +217,17 @@ class PPO(Algorithm):
 
         def minibatch(state, xs):
             actor, critic, optactor, optcritic = eqx.combine(state, static)
-            (obs, action, old_lp, adv, target), key = xs
+            (obs, action, old_lp, adv, target, online), key = xs
 
-            grads = eqx.filter_grad(actor_loss)(actor, obs, action, old_lp, adv, key)
+            grads = eqx.filter_grad(actor_loss)(
+                actor, obs, action, old_lp, adv, online, key
+            )
             updates, optactor = optim.update(
                 grads, optactor, eqx.filter(actor, eqx.is_inexact_array)
             )
             actor = eqx.apply_updates(actor, updates)
 
-            grads = eqx.filter_grad(critic_loss)(critic, obs, target)
+            grads = eqx.filter_grad(critic_loss)(critic, obs, target, online)
             updates, optcritic = optim.update(
                 grads, optcritic, eqx.filter(critic, eqx.is_inexact_array)
             )

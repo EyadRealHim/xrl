@@ -144,12 +144,16 @@ class A2C(Algorithm):
     Actor and critic keep separate parameters and optimizer states, so there is no
     shared-trunk loss to balance and therefore no value-loss coefficient.
 
+    Only transitions flagged `online` (the agent was active) contribute to the
+    losses and to the advantage normalisation statistics.
+
     Args:
         discount: Discount factor used for GAE.
         lambda_: GAE lambda.
         ent_coef: Weight of the entropy bonus (`0.0` disables it).
-        normalize_advantage: Standardise advantages over the whole rollout before
-            they weight the policy gradient. The critic's targets are unaffected.
+        normalize_advantage: Standardise advantages over the online transitions of
+            the rollout before they weight the policy gradient. The critic's targets
+            are unaffected.
     """
 
     discount: float = eqx.field(static=True, default=0.98)
@@ -185,6 +189,14 @@ class A2C(Algorithm):
             )
         )
 
+        # Train only on transitions where the agent was active. Shapes stay static
+        # for jit, so offline entries get zero weight instead of being indexed out.
+        online = transition.online.reshape(batch_n)
+        n_online = jnp.maximum(online.sum(), 1)  # fully offline batch -> zero loss
+
+        def masked_mean(x):
+            return jnp.where(online, x, 0.0).sum() / n_online
+
         values = jax.vmap(self.__value, in_axes=(None, 0))
 
         # GAE needs the critic's values anyway, so keep that forward pass as a VJP and
@@ -194,6 +206,11 @@ class A2C(Algorithm):
             lambda critic: values(critic, obs).squeeze(-1), agent.critic
         )
         next_value = values(agent.critic, next_obs).squeeze(-1)
+
+        # An online step followed by an offline one must not inherit advantage from
+        # it: cut the GAE trace there so it bootstraps from V(next_obs) instead.
+        next_offline = jnp.pad(~transition.online[:, 1:], ((0, 0), (0, 1)))
+        truncated = transition.truncated | next_offline
 
         def gae(reward, value, next_value, terminated, truncated):
             return estimate_advantage_and_returns(
@@ -211,27 +228,29 @@ class A2C(Algorithm):
             value.reshape(env_n, step_n),
             next_value.reshape(env_n, step_n),
             transition.terminated,
-            transition.truncated,
+            truncated,
         )
         advantage, returns = advantage.reshape(batch_n), returns.reshape(batch_n)
 
         if self.normalize_advantage:
-            advantage = (advantage - advantage.mean()) / (advantage.std() + 1e-8)
+            mean = masked_mean(advantage)
+            std = jnp.sqrt(masked_mean((advantage - mean) ** 2))
+            advantage = (advantage - mean) / (std + 1e-8)
 
         def actor_loss(actor, obs, action, advantage, key):
             log_p = jax.vmap(self.__log_prob, in_axes=(None, 0, 0))(actor, obs, action)
-            loss = -(advantage * log_p).mean()
+            loss = -masked_mean(advantage * log_p)
 
             if self.ent_coef != 0.0:
                 entropy = jax.vmap(self.__entropy, in_axes=(None, 0, 0))(
                     actor, obs, jax.random.split(key, batch_n)
                 )
-                loss = loss - self.ent_coef * entropy.mean()
+                loss = loss - self.ent_coef * masked_mean(entropy)
 
             return loss
 
         def critic_loss(value):
-            return ((value - returns) ** 2).mean()
+            return masked_mean((value - returns) ** 2)
 
         actor_grads = eqx.filter_grad(actor_loss)(
             agent.actor, obs, action, advantage, key
